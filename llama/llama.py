@@ -27,11 +27,10 @@ class LlamaDeviceMesh(DeviceMesh):
         """
         Create a device mesh for tensor and pipeline parallelism.
 
-        Args:
-            tensor_parallel (int): The number of tensor parallel processes.
-            pipeline_parallel (int, optional): The number of pipeline parallel processes. Defaults to 1.
+        :param tensor_parallel: The number of tensor parallel processes.
+        :param pipeline_parallel: The number of pipeline parallel processes. Defaults to 1.
         """
-        assert pipeline_parallel == 1, "pipepline parallelism is not yet implemented"
+        assert pipeline_parallel == 1, "pipeline parallelism is not yet implemented"
         assert (
             tensor_parallel * pipeline_parallel == dist.get_world_size()
         ), "world size must be equal to the product of tensor and pipeline parallelism"
@@ -44,8 +43,7 @@ class LlamaDeviceMesh(DeviceMesh):
         """
         Returns the rank of the current process in the tensor parallel group.
 
-        Returns:
-            int: The rank of the current process in the tensor parallel group.
+        :return: The rank of the current process in the tensor parallel group
         """
         return self["tp"].get_local_rank()
 
@@ -53,8 +51,7 @@ class LlamaDeviceMesh(DeviceMesh):
         """
         Returns the size of the tensor parallel group.
 
-        Returns:
-            int: The size of the tensor parallel group.
+        :return: The size of the tensor parallel group
         """
         return self["tp"].size()
 
@@ -62,8 +59,7 @@ class LlamaDeviceMesh(DeviceMesh):
         """
         Returns the rank of the current process in the pipeline parallel group.
 
-        Returns:
-            int: The rank of the current process in the pipeline parallel group.
+        :return: The rank of the current process in the pipeline parallel group
         """
         return self["pp"].get_local_rank()
 
@@ -71,8 +67,7 @@ class LlamaDeviceMesh(DeviceMesh):
         """
         Returns the size of the pipeline parallel group.
 
-        Returns:
-            int: The size of the pipeline parallel group.
+        :return: The size of the pipeline parallel group
         """
         return self["pp"].size()
 
@@ -95,14 +90,13 @@ class DistributedLlama(nn.Module):
         """
         Create a distributed Llama model.
 
-        Args:
-            name_or_path (str): The name or path of the pre-trained model.
-            device (torch.device): The device to load the model on.
-            device_mesh (LlamaDeviceMesh): The device mesh for tensor and pipeline parallelism.
-            dtype (torch.dtype, optional): The data type for the model. Defaults to torch.bfloat16.
-            delay_init (bool, optional): Whether to delay initialization until after sharding weights. Defaults to True.
-            load_checkpoint (bool, optional): Whether to load from a checkpoint. Defaults to False.
-            seed (int, optional): The random seed for initialization. Defaults to 0.
+        :param name_or_path: The name or path of the pre-trained model
+        :param device: The device to load the model on
+        :param device_mesh: The device mesh for tensor and pipeline parallelism
+        :param dtype: The data type for the model, defaults to torch.bfloat16
+        :param delay_init: Whether to delay initialization until after sharding weights, defaults to True
+        :param load_checkpoint: Whether to load from a checkpoint, defaults to False
+        :param seed: The random seed for initialization, defaults to 0
         """
         super().__init__()
         self.device_mesh = device_mesh
