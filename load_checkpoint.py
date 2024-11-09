@@ -3,6 +3,7 @@ import os
 from safetensors import safe_open
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 import tqdm
 
 
@@ -68,8 +69,9 @@ def _load_tensor_fully_or_partially(f, key: str,
     slc = f.get_slice(key)
     shape = slc.get_shape()
     param = params[key]
-    if tuple(param.shape) != tuple(shape):  # Requires partial load
-        diffs = [1 if (s != sts) else 0 for s, sts in zip(param.shape, shape)]
+    if isinstance(param.data, DTensor):  # Requires partial load
+        param_shape = param.data._local_tensor.shape
+        diffs = [1 if (s != sts) else 0 for s, sts in zip(param_shape, shape)]
         if sum(diffs) == 0:  # No tensor parallelism
             param[:] = slc[:]
             return
@@ -90,4 +92,8 @@ def _load_tensor_fully_or_partially(f, key: str,
                                 chunk_offset + param.shape[tp_dim], 1)
 
         # Copy slice
-        param[:] = slc[tuple(ndslice)]
+        local_data = param.data._local_tensor
+        local_data[:] = slc[tuple(ndslice)]
+    else:
+        # Full load
+        param[:] = slc[:]
