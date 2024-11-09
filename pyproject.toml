@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llama"
+version = "1.0.0"
+description = "LBANN Llama inference library"
+readme = "README.md"
+license = {file = "LICENSE"}
+dependencies = ["torch>=2.5"]
+
+[project.urls]
+Repository = "https://github.com/LBANN/llama.git"
