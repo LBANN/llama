@@ -3,7 +3,6 @@ import argparse
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
-from transformers.models.llama import LlamaConfig
 
 from llama import DistributedLlama, LlamaDeviceMesh
 
