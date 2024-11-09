@@ -1,4 +1,4 @@
-from typing import Union
+import math
 
 import torch
 import torch.distributed as dist
@@ -25,9 +25,10 @@ class LlamaDeviceMesh(DeviceMesh):
         assert (
             tensor_parallel * pipeline_parallel == dist.get_world_size()
         ), "world size must be equal to the product of tensor and pipeline parallelism"
-        super().__init__(
-            "cuda", (pipeline_parallel, tensor_parallel), mesh_dim_names=["pp", "tp"]
-        )
+        mesh_shape = (pipeline_parallel, tensor_parallel)
+        with torch.device("cpu"):
+            mesh = torch.arange(math.prod(mesh_shape), dtype=torch.int).view(mesh_shape)
+        super().__init__("cuda", mesh, mesh_dim_names=["pp", "tp"])
 
     def tp_rank(self):
         return self["tp"].get_local_rank()

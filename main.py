@@ -27,7 +27,6 @@ def main():
     device = torch.device("cuda")
     dist.init_process_group("nccl")
     device_mesh = LlamaDeviceMesh(tensor_parallel=dist.get_world_size())
-    print(device_mesh.tp_rank(), device_mesh.pp_rank())
 
     if args.model_size in ["8B", "70B"]:
         tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
