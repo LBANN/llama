@@ -35,7 +35,7 @@ def main():
     else:
         name = "meta-llama/Llama-3.1-405B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(name)
-        model = DistributedLlama(name, device_mesh)
+        model = DistributedLlama(name, device, device_mesh)
 
     inputs = tokenizer("What is Apple?", return_tensors="pt").to(device)
     outputs = tokenizer.batch_decode(
