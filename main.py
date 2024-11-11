@@ -39,9 +39,10 @@ def main():
         tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
         model = DistributedLlama(args.model_dir, device, device_mesh, delay_init=True, load_checkpoint=False)
         print('Loading checkpoint...')
-        load_checkpoint.load_checkpoint(model, args.model_dir,
-                                        device_mesh.tp_rank(),
-                                        device_mesh.tp_size(), device)
+        with torch.no_grad():
+            load_checkpoint.load_checkpoint(model.model, args.model_dir,
+                                            device_mesh.tp_rank(),
+                                            device_mesh.tp_size(), device)
         print('Done loading checkpoint')
 
     inputs = tokenizer("What is Apple?", return_tensors="pt").to(device)
