@@ -33,7 +33,9 @@ def load_checkpoint(model: nn.Module, folder: str, tp_rank: int,
     params = {k: v for k, v in model.named_parameters()}
 
     # Load the necessary files
-    for file in tqdm.tqdm(files, desc='Loading necessary safetensors files'):
+    for file in tqdm.tqdm(files,
+                          desc='Loading necessary safetensors files',
+                          total=len(files)):
         filepath = os.path.join(folder, file)
         with safe_open(filepath, framework="pt", device=dev) as f:
             for key in f.keys():
