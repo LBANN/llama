@@ -42,6 +42,7 @@ def main():
         load_checkpoint.load_checkpoint(model, args.model_dir,
                                         device_mesh.tp_rank(),
                                         device_mesh.tp_size(), device)
+        print('Done loading checkpoint')
 
     inputs = tokenizer("What is Apple?", return_tensors="pt").to(device)
     outputs = tokenizer.batch_decode(model.generate(**inputs,

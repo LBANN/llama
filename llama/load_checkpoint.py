@@ -53,7 +53,7 @@ def _intersect_tensors(model: nn.Module,
     result = set()
     for pname, _ in model.named_parameters():
         if pname in available_tensors:
-            result.add(pname)
+            result.add(available_tensors[pname])
     return result
 
 
