@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from llama import DistributedLlama, LlamaDeviceMesh
+from llama import DistributedLlama, LlamaDeviceMesh, load_checkpoint
 
 
 def get_args():
@@ -29,18 +29,24 @@ def main():
 
     if args.model_size in ["8B", "70B"]:
         tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-        model = DistributedLlama(
-            args.model_dir, device, device_mesh, delay_init=False, load_checkpoint=True
-        )
+        model = DistributedLlama(args.model_dir,
+                                 device,
+                                 device_mesh,
+                                 delay_init=False,
+                                 load_checkpoint=True)
     else:
         name = "meta-llama/Llama-3.1-405B-Instruct"
-        tokenizer = AutoTokenizer.from_pretrained(name)
-        model = DistributedLlama(name, device, device_mesh)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+        model = DistributedLlama(args.model_dir, device, device_mesh, delay_init=True, load_checkpoint=False)
+        print('Loading checkpoint...')
+        load_checkpoint.load_checkpoint(model, args.model_dir,
+                                        device_mesh.tp_rank(),
+                                        device_mesh.tp_size())
 
     inputs = tokenizer("What is Apple?", return_tensors="pt").to(device)
-    outputs = tokenizer.batch_decode(
-        model.generate(**inputs, max_new_tokens=100), skip_special_tokens=True
-    )
+    outputs = tokenizer.batch_decode(model.generate(**inputs,
+                                                    max_new_tokens=100),
+                                     skip_special_tokens=True)
 
     if dist.get_rank() == 0:
         print(outputs)
