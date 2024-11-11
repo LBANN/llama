@@ -23,7 +23,7 @@ def get_args():
 def main():
     args = get_args()
 
-    device = torch.device("cuda")
+    device = torch.device("cuda:0")
     dist.init_process_group("nccl")
     device_mesh = LlamaDeviceMesh(tensor_parallel=dist.get_world_size())
 
@@ -41,7 +41,7 @@ def main():
         print('Loading checkpoint...')
         load_checkpoint.load_checkpoint(model, args.model_dir,
                                         device_mesh.tp_rank(),
-                                        device_mesh.tp_size())
+                                        device_mesh.tp_size(), device)
 
     inputs = tokenizer("What is Apple?", return_tensors="pt").to(device)
     outputs = tokenizer.batch_decode(model.generate(**inputs,

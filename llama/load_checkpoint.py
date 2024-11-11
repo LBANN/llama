@@ -8,7 +8,7 @@ import tqdm
 
 
 def load_checkpoint(model: nn.Module, folder: str, tp_rank: int,
-                    tp_world_size: int):
+                    tp_world_size: int, device: torch.device):
     """
     Loads a safetensors checkpoint from a folder with tensor and pipeline
     parallelism support.
@@ -19,6 +19,7 @@ def load_checkpoint(model: nn.Module, folder: str, tp_rank: int,
                    exist in the folder.
     :param tp_rank: The rank of the tensor parallelism group.
     :param tp_world_size: The world size of the tensor parallelism group.
+    :param device: The device to load the model on.
     :note: Operates in-place on the model.
     """
     with open(os.path.join(folder, 'model.safetensors.index.json'), 'r') as fp:
@@ -28,7 +29,7 @@ def load_checkpoint(model: nn.Module, folder: str, tp_rank: int,
     files = _intersect_tensors(model, index['weight_map'])
 
     # Get current device
-    dev = torch.device('cuda', torch.cuda.current_device())
+    dev = device
 
     params = {k: v for k, v in model.named_parameters()}
 
