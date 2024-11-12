@@ -29,17 +29,17 @@ def load_checkpoint(model: nn.Module, folder: str, tp_rank: int,
     files = _intersect_tensors(model, index['weight_map'])
 
     # Get current device
-    dev = device
+    dev = 'cpu' # str(device)
 
     params = {k: v for k, v in model.named_parameters()}
 
     # Load the necessary files
-    for file in tqdm.tqdm(files,
+    for file in tqdm.tqdm(sorted(files),
                           desc='Loading necessary safetensors files',
                           total=len(files)):
         filepath = os.path.join(folder, file)
         with safe_open(filepath, framework="pt", device=dev) as f:
-            for key in f.keys():
+            for key in sorted(f.keys()):
                 if key in params:
                     _load_tensor_fully_or_partially(f, key, params, tp_rank,
                                                     tp_world_size)
@@ -70,19 +70,20 @@ def _load_tensor_fully_or_partially(f, key: str,
     :param tp_world_size: The world size of the tensor parallelism group.
     """
     slc = f.get_slice(key)
-    shape = slc.get_shape()
     param = params[key]
+
     if isinstance(param.data, DTensor):  # Requires partial load
+        shape = slc.get_shape()
         param_shape = param.data._local_tensor.shape
         diffs = [1 if (s != sts) else 0 for s, sts in zip(param_shape, shape)]
         if sum(diffs) == 0:  # No tensor parallelism
-            param[:] = slc[:]
+            param.data._local_tensor[:] = slc[:] #DTensor.from_local(slc[:], param.data.device_mesh)
             return
 
         # Tensor parallelism (1D)
         if sum(diffs) > 1:
             raise ValueError('Only 1D parallelism is currently supported')
-        tp_dim = next(d == 1 for d in diffs)
+        tp_dim = next(i for i, d in enumerate(diffs) if d == 1)
 
         # Get the total size and compute slice offset
         chunk_size = param.shape[tp_dim] // tp_world_size
@@ -90,13 +91,12 @@ def _load_tensor_fully_or_partially(f, key: str,
 
         # Prepare slice
         # Use parameter shape to account for uneven distribution across ranks
-        ndslice = [slice(None, None, None)] * len(shape)
+        ndslice = [slice(0, s, 1) for s in param_shape]
         ndslice[tp_dim] = slice(chunk_offset,
-                                chunk_offset + param.shape[tp_dim], 1)
+                                chunk_offset + param_shape[tp_dim], 1)
 
         # Copy slice
-        local_data = param.data._local_tensor
-        local_data[:] = slc[tuple(ndslice)]
+        param.data._local_tensor[:] = slc[tuple(ndslice)]
     else:
         # Full load
-        param[:] = slc[:]
+        param.data[:] = slc
