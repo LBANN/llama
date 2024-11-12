@@ -70,6 +70,16 @@ class LlamaDeviceMesh(DeviceMesh):
         """
         return self["pp"].size()
 
+    def coord_to_rank(self, pp: int, tp: int):
+        """
+        Returns the rank of the process at the given coordinates in the device mesh.
+
+        :param pp: The pipeline parallel coordinate
+        :param tp: The tensor parallel coordinate
+        :return: The rank of the process at the given coordinates
+        """
+        return self.mesh[pp, tp].item()
+
 
 class DistributedLlama(nn.Module):
     """
@@ -180,7 +190,6 @@ class DistributedLlama(nn.Module):
         """
         # Get the ranks and sizes for tensor and pipeline parallelism
         tp_rank = self.device_mesh.tp_rank()
-        tp_size = self.device_mesh.tp_size()
         pp_rank = self.device_mesh.pp_rank()
         pp_size = self.device_mesh.pp_size()
         pp_group = self.device_mesh["pp"].get_group()
@@ -198,7 +207,7 @@ class DistributedLlama(nn.Module):
             def recv_hook(module, hidden_states):
                 dist.recv(
                     hidden_states[0]._local_tensor,
-                    src=dist.get_rank() - tp_size,
+                    src=self.device_mesh.coord_to_rank(pp_rank - 1, tp_rank),
                     group=pp_group,
                 )
 
@@ -210,7 +219,7 @@ class DistributedLlama(nn.Module):
             def send_hook(module, in_hidden_states, out_hidden_states):
                 dist.send(
                     out_hidden_states[0]._local_tensor,
-                    dst=dist.get_rank() + tp_size,
+                    dst=self.device_mesh.coord_to_rank(pp_rank + 1, tp_rank),
                     group=pp_group,
                 )
 
@@ -218,13 +227,27 @@ class DistributedLlama(nn.Module):
 
         # Brodcast final output to all processes in the pipeline parallel group
         def broadcast_hook(module, hidden_states):
-            src = dist.get_world_size() - tp_size + tp_rank
-            dist.broadcast(hidden_states[0]._local_tensor, src=src, group=pp_group)
+            dist.broadcast(
+                hidden_states[0]._local_tensor,
+                src=self.device_mesh.coord_to_rank(-1, tp_rank),
+                group=pp_group,
+            )
 
         self.model.model.norm.register_forward_pre_hook(broadcast_hook)
 
-        # Replace the full set of blocks with the local set
-        self.model.model.layers = local_blocks
+        # Replace blocks not in this process with an identity module
+        class CustomIdentity(nn.Identity):
+            def forward(self, hidden_states, **kwargs):
+                output = (hidden_states,)
+                if kwargs["output_attentions"]:
+                    output += (None,)
+                if kwargs["use_cache"]:
+                    output += (kwargs["past_key_value"],)
+                return output
+
+        for i, block in enumerate(self.model.model.layers):
+            if block not in local_blocks:
+                self.model.model.layers[i] = CustomIdentity()
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
