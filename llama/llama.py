@@ -30,7 +30,6 @@ class LlamaDeviceMesh(DeviceMesh):
         :param tensor_parallel: The number of tensor parallel processes.
         :param pipeline_parallel: The number of pipeline parallel processes. Defaults to 1.
         """
-        assert pipeline_parallel == 1, "pipeline parallelism is not yet implemented"
         assert (
             tensor_parallel * pipeline_parallel == dist.get_world_size()
         ), "world size must be equal to the product of tensor and pipeline parallelism"
@@ -116,6 +115,9 @@ class DistributedLlama(nn.Module):
         # Setup tensor parallel model sharding
         self._shard_model()
 
+        # Setup pipeline parallelism
+        self._pipeline_model()
+
         # Realize the model weights, if needed
         if delay_init:
             self.model.to_empty(device=device)
@@ -171,6 +173,58 @@ class DistributedLlama(nn.Module):
             "lm_head": ColwiseParallel(output_layouts=Replicate()),
         }
         parallelize_module(self.model, self.device_mesh["tp"], model_plan)
+
+    def _pipeline_model(self):
+        """
+        Setup pipeline parallelism.
+        """
+        # Get the ranks and sizes for tensor and pipeline parallelism
+        tp_rank = self.device_mesh.tp_rank()
+        tp_size = self.device_mesh.tp_size()
+        pp_rank = self.device_mesh.pp_rank()
+        pp_size = self.device_mesh.pp_size()
+        pp_group = self.device_mesh["pp"].get_group()
+
+        # Get the local blocks for this process
+        blocks = self.model.model.layers
+        num_local_blocks = math.ceil(len(blocks) / pp_size)
+        start_block = pp_rank * num_local_blocks
+        end_block = min(start_block + num_local_blocks, len(blocks))
+        local_blocks = blocks[start_block:end_block]
+
+        # Setup recv hook for the first block
+        if pp_rank > 0:
+
+            def recv_hook(module, hidden_states):
+                dist.recv(
+                    hidden_states[0]._local_tensor,
+                    src=dist.get_rank() - tp_size,
+                    group=pp_group,
+                )
+
+            local_blocks[0].register_forward_pre_hook(recv_hook)
+
+        # Setup send hook for the last block
+        if pp_rank < pp_size - 1:
+
+            def send_hook(module, in_hidden_states, out_hidden_states):
+                dist.send(
+                    out_hidden_states[0]._local_tensor,
+                    dst=dist.get_rank() + tp_size,
+                    group=pp_group,
+                )
+
+            local_blocks[-1].register_forward_hook(send_hook)
+
+        # Brodcast final output to all processes in the pipeline parallel group
+        def broadcast_hook(module, hidden_states):
+            src = dist.get_world_size() - tp_size + tp_rank
+            dist.broadcast(hidden_states[0]._local_tensor, src=src, group=pp_group)
+
+        self.model.model.norm.register_forward_pre_hook(broadcast_hook)
+
+        # Replace the full set of blocks with the local set
+        self.model.model.layers = local_blocks
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
