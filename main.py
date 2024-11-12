@@ -70,6 +70,7 @@ def main():
             load_checkpoint=not args.benchmark,
         )
 
+    # This is a "barrier" that is supported with a device mesh
     dist.all_reduce(torch.tensor(0, device=device), op=dist.ReduceOp.SUM)
 
     # Print how much memory is used by the GPU
