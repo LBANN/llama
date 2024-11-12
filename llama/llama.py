@@ -13,6 +13,7 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
+from llama import load_checkpoint as lc
 
 
 class LlamaDeviceMesh(DeviceMesh):
@@ -110,14 +111,10 @@ class DistributedLlama(nn.Module):
         # Create the model and load from a checkpoint if needed
         init_device = torch.device("meta") if delay_init else device
         with init_device:
-            if load_checkpoint:
-                assert not delay_init, "delay_init must be False when loading checkpoint until sharded checkpoint loading is implemented"
-                self.model = LlamaForCausalLM.from_pretrained(name_or_path)
-            else:
-                config = LlamaConfig.from_pretrained(name_or_path)
-                self.model = LlamaForCausalLM(config)
-                self.model.to(dtype)
-                self.model.eval()
+            config = LlamaConfig.from_pretrained(name_or_path)
+            self.model = LlamaForCausalLM(config)
+            self.model.to(dtype)
+            self.model.eval()
 
         # Setup tensor parallel model sharding
         if device_mesh.tp_size() > 1:
@@ -133,6 +130,15 @@ class DistributedLlama(nn.Module):
 
         # Ensure all ranks have the same seed for generation
         torch.manual_seed(seed)
+
+        if load_checkpoint:
+            lc.load_checkpoint(
+                self.model,
+                name_or_path,
+                device_mesh.tp_rank(),
+                device_mesh.tp_size(),
+                device,
+            )
 
     def _shard_model(self):
         """
