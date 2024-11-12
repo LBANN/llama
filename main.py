@@ -48,6 +48,9 @@ def main():
         f"Device mesh: rank={dist.get_rank()}, TP={device_mesh.tp_rank()}/{device_mesh.tp_size()}, PP={device_mesh.pp_rank()}/{device_mesh.pp_size()}"
     )
 
+    if args.compile and device_mesh.tp_size() > 1:
+        raise ValueError("torch.compile and tensor parallelism are mutually exclusive")
+
     if args.model_size in ["8B", "70B"]:
         tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
         model = DistributedLlama(
@@ -75,6 +78,9 @@ def main():
 
     inputs = tokenizer("What is DaCe?", return_tensors="pt").to(device)
     output_streamer = MasterRankTextStreamer(tokenizer, skip_special_tokens=True)
+
+    if args.compile:
+        model.model = torch.compile(model.model, mode="reduce-overhead")
 
     outputs = model.generate(
         **inputs,
