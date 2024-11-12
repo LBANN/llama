@@ -143,6 +143,7 @@ class DistributedLlama(nn.Module):
             block_plan = {
                 "input_layernorm": SequenceParallel(),
                 "self_attn": PrepareModuleInput(
+                    input_kwarg_layouts={"hidden_states": Shard(1)},
                     desired_input_kwarg_layouts={"hidden_states": Replicate()},
                 ),
                 "self_attn.q_proj": ColwiseParallel(),
@@ -153,6 +154,7 @@ class DistributedLlama(nn.Module):
                 ),
                 "post_attention_layernorm": SequenceParallel(),
                 "mlp": PrepareModuleInput(
+                    input_layouts=Shard(1),
                     desired_input_layouts=Replicate(),
                 ),
                 "mlp.gate_proj": ColwiseParallel(),
