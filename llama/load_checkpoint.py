@@ -82,6 +82,9 @@ def _load_tensor_fully_or_partially(
     param = params[key]
 
     if isinstance(param.data, DTensor):  # Requires partial load
+        # The following code would cause all the tensors to be loaded by tp_rank=0
+        # and then broadcasted to the other ranks. We can go back to using this
+        # function when PyTorch adds an optional root rank
         # slc_as_dtensor = distribute_tensor(slc[:], param.data.device_mesh, param.data.placements)
         # param.data[:] = slc_as_dtensor[:]
         # return
