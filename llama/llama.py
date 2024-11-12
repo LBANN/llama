@@ -4,10 +4,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import (
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     PrepareModuleInput,
@@ -30,7 +27,6 @@ class LlamaDeviceMesh(DeviceMesh):
         :param tensor_parallel: The number of tensor parallel processes.
         :param pipeline_parallel: The number of pipeline parallel processes. Defaults to 1.
         """
-        assert pipeline_parallel == 1, "pipeline parallelism is not yet implemented"
         assert (
             tensor_parallel * pipeline_parallel == dist.get_world_size()
         ), "world size must be equal to the product of tensor and pipeline parallelism"
@@ -70,6 +66,16 @@ class LlamaDeviceMesh(DeviceMesh):
         :return: The size of the pipeline parallel group
         """
         return self["pp"].size()
+
+    def coord_to_rank(self, pp: int, tp: int):
+        """
+        Returns the rank of the process at the given coordinates in the device mesh.
+
+        :param pp: The pipeline parallel coordinate
+        :param tp: The tensor parallel coordinate
+        :return: The rank of the process at the given coordinates
+        """
+        return self.mesh[pp, tp].item()
 
 
 class DistributedLlama(nn.Module):
@@ -114,7 +120,12 @@ class DistributedLlama(nn.Module):
                 self.model.eval()
 
         # Setup tensor parallel model sharding
-        self._shard_model()
+        if device_mesh.tp_size() > 1:
+            self._shard_model()
+
+        # Setup pipeline parallelism
+        if device_mesh.pp_size() > 1:
+            self._pipeline_model()
 
         # Realize the model weights, if needed
         if delay_init:
@@ -132,6 +143,7 @@ class DistributedLlama(nn.Module):
             block_plan = {
                 "input_layernorm": SequenceParallel(),
                 "self_attn": PrepareModuleInput(
+                    input_kwarg_layouts={"hidden_states": Shard(1)},
                     desired_input_kwarg_layouts={"hidden_states": Replicate()},
                 ),
                 "self_attn.q_proj": ColwiseParallel(),
@@ -142,6 +154,7 @@ class DistributedLlama(nn.Module):
                 ),
                 "post_attention_layernorm": SequenceParallel(),
                 "mlp": PrepareModuleInput(
+                    input_layouts=Shard(1),
                     desired_input_layouts=Replicate(),
                 ),
                 "mlp.gate_proj": ColwiseParallel(),
@@ -171,6 +184,87 @@ class DistributedLlama(nn.Module):
             "lm_head": ColwiseParallel(output_layouts=Replicate()),
         }
         parallelize_module(self.model, self.device_mesh["tp"], model_plan)
+
+    def _pipeline_model(self):
+        """
+        Setup pipeline parallelism.
+        """
+        # Get the ranks and sizes for tensor and pipeline parallelism
+        tp_rank = self.device_mesh.tp_rank()
+        pp_rank = self.device_mesh.pp_rank()
+        pp_size = self.device_mesh.pp_size()
+
+        # Get the local blocks for this process
+        blocks = self.model.model.layers
+        num_local_blocks = math.ceil(len(blocks) / pp_size)
+        start_block = pp_rank * num_local_blocks
+        end_block = min(start_block + num_local_blocks, len(blocks))
+        local_blocks = blocks[start_block:end_block]
+
+        # Setup recv hook for the first block
+        if pp_rank > 0:
+
+            def recv_hook(module, hidden_states):
+                tensor = hidden_states[0]
+                if isinstance(tensor, DTensor):
+                    tensor = tensor._local_tensor
+                dist.batch_isend_irecv(
+                    [
+                        dist.P2POp(
+                            dist.irecv,
+                            tensor,
+                            self.device_mesh.coord_to_rank(pp_rank - 1, tp_rank),
+                        )
+                    ]
+                )[0].wait()
+
+            local_blocks[0].register_forward_pre_hook(recv_hook)
+
+        # Setup send hook for the last block
+        if pp_rank < pp_size - 1:
+
+            def send_hook(module, in_hidden_states, out_hidden_states):
+                tensor = out_hidden_states[0]
+                if isinstance(tensor, DTensor):
+                    tensor = tensor._local_tensor
+                dist.batch_isend_irecv(
+                    [
+                        dist.P2POp(
+                            dist.isend,
+                            tensor,
+                            self.device_mesh.coord_to_rank(pp_rank + 1, tp_rank),
+                        )
+                    ]
+                )[0].wait()
+
+            local_blocks[-1].register_forward_hook(send_hook)
+
+        # Brodcast final output to all processes in the pipeline parallel group
+        def broadcast_hook(module, hidden_states):
+            tensor = hidden_states[0]
+            if isinstance(tensor, DTensor):
+                tensor = tensor._local_tensor
+            dist.broadcast(
+                tensor,
+                src=self.device_mesh.coord_to_rank(-1, tp_rank),
+                group=self.device_mesh["pp"].get_group(),
+            )
+
+        self.model.model.norm.register_forward_pre_hook(broadcast_hook)
+
+        # Replace blocks not in this process with an identity module
+        class CustomIdentity(nn.Identity):
+            def forward(self, hidden_states, **kwargs):
+                output = (hidden_states,)
+                if kwargs["output_attentions"]:
+                    output += (None,)
+                if kwargs["use_cache"]:
+                    output += (kwargs["past_key_value"],)
+                return output
+
+        for i, block in enumerate(self.model.model.layers):
+            if block not in local_blocks:
+                self.model.model.layers[i] = CustomIdentity()
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
