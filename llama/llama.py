@@ -4,10 +4,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import (
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     PrepareModuleInput,
@@ -123,10 +120,12 @@ class DistributedLlama(nn.Module):
                 self.model.eval()
 
         # Setup tensor parallel model sharding
-        self._shard_model()
+        if device_mesh.tp_size() > 1:
+            self._shard_model()
 
         # Setup pipeline parallelism
-        self._pipeline_model()
+        if device_mesh.pp_size() > 1:
+            self._pipeline_model()
 
         # Realize the model weights, if needed
         if delay_init:
@@ -192,7 +191,6 @@ class DistributedLlama(nn.Module):
         tp_rank = self.device_mesh.tp_rank()
         pp_rank = self.device_mesh.pp_rank()
         pp_size = self.device_mesh.pp_size()
-        pp_group = self.device_mesh["pp"].get_group()
 
         # Get the local blocks for this process
         blocks = self.model.model.layers
@@ -205,11 +203,18 @@ class DistributedLlama(nn.Module):
         if pp_rank > 0:
 
             def recv_hook(module, hidden_states):
-                dist.recv(
-                    hidden_states[0]._local_tensor,
-                    src=self.device_mesh.coord_to_rank(pp_rank - 1, tp_rank),
-                    group=pp_group,
-                )
+                tensor = hidden_states[0]
+                if isinstance(tensor, DTensor):
+                    tensor = tensor._local_tensor
+                dist.batch_isend_irecv(
+                    [
+                        dist.P2POp(
+                            dist.irecv,
+                            tensor,
+                            self.device_mesh.coord_to_rank(pp_rank - 1, tp_rank),
+                        )
+                    ]
+                )[0].wait()
 
             local_blocks[0].register_forward_pre_hook(recv_hook)
 
@@ -217,20 +222,30 @@ class DistributedLlama(nn.Module):
         if pp_rank < pp_size - 1:
 
             def send_hook(module, in_hidden_states, out_hidden_states):
-                dist.send(
-                    out_hidden_states[0]._local_tensor,
-                    dst=self.device_mesh.coord_to_rank(pp_rank + 1, tp_rank),
-                    group=pp_group,
-                )
+                tensor = out_hidden_states[0]
+                if isinstance(tensor, DTensor):
+                    tensor = tensor._local_tensor
+                dist.batch_isend_irecv(
+                    [
+                        dist.P2POp(
+                            dist.isend,
+                            tensor,
+                            self.device_mesh.coord_to_rank(pp_rank + 1, tp_rank),
+                        )
+                    ]
+                )[0].wait()
 
             local_blocks[-1].register_forward_hook(send_hook)
 
         # Brodcast final output to all processes in the pipeline parallel group
         def broadcast_hook(module, hidden_states):
+            tensor = hidden_states[0]
+            if isinstance(tensor, DTensor):
+                tensor = tensor._local_tensor
             dist.broadcast(
-                hidden_states[0]._local_tensor,
+                tensor,
                 src=self.device_mesh.coord_to_rank(-1, tp_rank),
-                group=pp_group,
+                group=self.device_mesh["pp"].get_group(),
             )
 
         self.model.model.norm.register_forward_pre_hook(broadcast_hook)
