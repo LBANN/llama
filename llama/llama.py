@@ -5,79 +5,18 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torch.distributed.tensor.parallel import (
+from transformers.models.llama import LlamaConfig, LlamaForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
+
+from llama import load_checkpoint as lc
+from llama.parallel import (
     ColwiseParallel,
-    PrepareModuleInput,
+    EmbedParallel,
+    LlamaDeviceMesh,
     RowwiseParallel,
     SequenceParallel,
     parallelize_module,
 )
-from transformers.models.llama import LlamaConfig, LlamaForCausalLM
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
-from llama import load_checkpoint as lc
-
-
-class LlamaDeviceMesh(DeviceMesh):
-    """
-    A device mesh subclass for Llama tensor and pipeline parallelism.
-    """
-
-    def __init__(self, tensor_parallel: int = 1, pipeline_parallel: int = 1):
-        """
-        Create a device mesh for tensor and pipeline parallelism.
-
-        :param tensor_parallel: The number of tensor parallel processes. Defaults to 1.
-        :param pipeline_parallel: The number of pipeline parallel processes. Defaults to 1.
-        """
-        assert (
-            tensor_parallel * pipeline_parallel == dist.get_world_size()
-        ), "world size must be equal to the product of tensor and pipeline parallelism"
-        mesh_shape = (pipeline_parallel, tensor_parallel)
-        with torch.device("cpu"):
-            mesh = torch.arange(math.prod(mesh_shape), dtype=torch.int).view(mesh_shape)
-        super().__init__("cuda", mesh, mesh_dim_names=["pp", "tp"])
-
-    def tp_rank(self):
-        """
-        Returns the rank of the current process in the tensor parallel group.
-
-        :return: The rank of the current process in the tensor parallel group
-        """
-        return self["tp"].get_local_rank()
-
-    def tp_size(self):
-        """
-        Returns the size of the tensor parallel group.
-
-        :return: The size of the tensor parallel group
-        """
-        return self["tp"].size()
-
-    def pp_rank(self):
-        """
-        Returns the rank of the current process in the pipeline parallel group.
-
-        :return: The rank of the current process in the pipeline parallel group
-        """
-        return self["pp"].get_local_rank()
-
-    def pp_size(self):
-        """
-        Returns the size of the pipeline parallel group.
-
-        :return: The size of the pipeline parallel group
-        """
-        return self["pp"].size()
-
-    def coord_to_rank(self, pp: int, tp: int):
-        """
-        Returns the rank of the process at the given coordinates in the device mesh.
-
-        :param pp: The pipeline parallel coordinate
-        :param tp: The tensor parallel coordinate
-        :return: The rank of the process at the given coordinates
-        """
-        return self.mesh[pp, tp].item()
 
 
 class DistributedLlama(nn.Module):
@@ -153,49 +92,34 @@ class DistributedLlama(nn.Module):
         # Shard each block in the transformer
         for layer in self.model.model.layers:
             block_plan = {
-                "input_layernorm": SequenceParallel(),
-                "self_attn": PrepareModuleInput(
-                    input_kwarg_layouts={"hidden_states": Shard(1)},
-                    desired_input_kwarg_layouts={"hidden_states": Replicate()},
-                ),
                 "self_attn.q_proj": ColwiseParallel(),
                 "self_attn.k_proj": ColwiseParallel(),
                 "self_attn.v_proj": ColwiseParallel(),
-                "self_attn.o_proj": RowwiseParallel(
-                    output_layouts=Shard(1), use_local_output=False
-                ),
-                "post_attention_layernorm": SequenceParallel(),
-                "mlp": PrepareModuleInput(
-                    input_layouts=Shard(1),
-                    desired_input_layouts=Replicate(),
-                ),
+                "self_attn.o_proj": RowwiseParallel(),
                 "mlp.gate_proj": ColwiseParallel(),
                 "mlp.up_proj": ColwiseParallel(),
-                "mlp.down_proj": RowwiseParallel(
-                    output_layouts=Shard(1), use_local_output=False
-                ),
+                "mlp.down_proj": RowwiseParallel(),
             }
-            parallelize_module(layer, self.device_mesh["tp"], block_plan)
+            parallelize_module(layer, self.device_mesh, block_plan)
 
             # Adjust the number of local heads
             layer.self_attn.num_heads = (
                 layer.self_attn.num_heads // self.device_mesh.tp_size()
             )
+
             layer.self_attn.num_key_value_heads = (
                 layer.self_attn.num_key_value_heads // self.device_mesh.tp_size()
             )
 
         # Shard the model embedding and output layers
         model_plan = {
-            "model.embed_tokens": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-                use_local_output=False,
-            ),
-            "model.norm": SequenceParallel(),
-            "lm_head": ColwiseParallel(output_layouts=Replicate()),
+            "model.embed_tokens": EmbedParallel(),
         }
-        parallelize_module(self.model, self.device_mesh["tp"], model_plan)
+        parallelize_module(self.model, self.device_mesh, model_plan)
+
+        self.model.config.num_key_value_heads = (
+            self.model.config.num_key_value_heads // self.device_mesh.tp_size()
+        )
 
     def _pipeline_model(self):
         """

@@ -1,1 +1,2 @@
-from .llama import DistributedLlama, LlamaDeviceMesh
+from .llama import DistributedLlama
+from .parallel import LlamaDeviceMesh
