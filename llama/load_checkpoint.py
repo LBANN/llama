@@ -81,7 +81,7 @@ def _load_tensor_fully_or_partially(
     slc = f.get_slice(key)
     param = params[key]
 
-    if isinstance(param.data, DTensor):  # Requires partial load
+    if tp_world_size > 1:  # Requires partial load
         # The following code would cause all the tensors to be loaded by tp_rank=0
         # and then broadcasted to the other ranks. We can go back to using this
         # function when PyTorch adds an optional root rank
@@ -90,10 +90,10 @@ def _load_tensor_fully_or_partially(
         # return
 
         shape = slc.get_shape()
-        param_shape = param.data._local_tensor.shape
+        param_shape = param.data.shape
         diffs = [1 if (s != sts) else 0 for s, sts in zip(param_shape, shape)]
         if sum(diffs) == 0:  # No tensor parallelism
-            param.data._local_tensor[:] = slc[:]
+            param.data[:] = slc[:]
             return
 
         # Tensor parallelism (1D)
@@ -102,7 +102,7 @@ def _load_tensor_fully_or_partially(
         tp_dim = next(i for i, d in enumerate(diffs) if d == 1)
 
         # Get the total size and compute slice offset
-        chunk_size = param.shape[tp_dim] // tp_world_size
+        chunk_size = shape[tp_dim] // tp_world_size
         chunk_offset = tp_rank * chunk_size
 
         # Prepare slice
@@ -111,7 +111,7 @@ def _load_tensor_fully_or_partially(
         ndslice[tp_dim] = slice(chunk_offset, chunk_offset + param_shape[tp_dim], 1)
 
         # Copy slice
-        param.data._local_tensor[:] = slc[tuple(ndslice)]
+        param.data[:] = slc[tuple(ndslice)]
     else:
         # Full load
         param.data[:] = slc[:]
