@@ -10,13 +10,6 @@ from llama.streaming import MasterRankTextStreamer
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model-size",
-        type=str,
-        default="405B",
-        choices=["8B", "70B", "405B"],
-        required=True,
-    )
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument(
         "--pp",
@@ -51,24 +44,14 @@ def main():
     if args.compile and device_mesh.tp_size() > 1:
         raise ValueError("torch.compile and tensor parallelism are mutually exclusive")
 
-    if args.model_size in ["8B", "70B"]:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-        model = DistributedLlama(
-            args.model_dir,
-            device,
-            device_mesh,
-            delay_init=False,
-            load_checkpoint=not args.benchmark,
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-        model = DistributedLlama(
-            args.model_dir,
-            device,
-            device_mesh,
-            delay_init=True,
-            load_checkpoint=not args.benchmark,
-        )
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+    model = DistributedLlama(
+        args.model_dir,
+        device,
+        device_mesh,
+        delay_init=True,
+        load_checkpoint=not args.benchmark,
+    )
 
     # This is a "barrier" that is supported with a device mesh
     dist.all_reduce(torch.tensor(0, device=device), op=dist.ReduceOp.SUM)
@@ -77,7 +60,13 @@ def main():
     if dist.get_rank() == 0:
         print("Memory used:", torch.cuda.memory_allocated() / 1024**3, "GiB")
 
-    inputs = tokenizer("What is DaCe?", return_tensors="pt").to(device)
+    inputs = tokenizer.apply_chat_template(
+        [
+            {"role": "user", "content": "What is LBANN?"},
+        ],
+        return_tensors="pt",
+        return_dict=True,
+    ).to(device)
     output_streamer = MasterRankTextStreamer(tokenizer, skip_special_tokens=True)
 
     if args.compile:

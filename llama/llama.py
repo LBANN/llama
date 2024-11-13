@@ -13,6 +13,7 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
 )
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from llama import load_checkpoint as lc
 
 
@@ -111,7 +112,9 @@ class DistributedLlama(nn.Module):
         # Create the model and load from a checkpoint if needed
         init_device = torch.device("meta") if delay_init else device
         with init_device:
-            config = LlamaConfig.from_pretrained(name_or_path)
+            config = LlamaConfig.from_pretrained(
+                name_or_path, torch_dtype=dtype, attn_implementation="sdpa"
+            )
             self.model = LlamaForCausalLM(config)
             self.model.to(dtype)
             self.model.eval()
@@ -127,6 +130,9 @@ class DistributedLlama(nn.Module):
         # Realize the model weights, if needed
         if delay_init:
             self.model.to_empty(device=device)
+
+            with device:
+                self.model.model.rotary_emb = LlamaRotaryEmbedding(config=config)
 
         # Ensure all ranks have the same seed for generation
         torch.manual_seed(seed)
@@ -238,6 +244,7 @@ class DistributedLlama(nn.Module):
 
         # Brodcast final output to all processes in the pipeline parallel group
         src_rank_for_bcast = self.device_mesh.coord_to_rank(-1, tp_rank)
+
         def broadcast_hook(module, hidden_states):
             tensor = hidden_states[0]
             if isinstance(tensor, DTensor):
@@ -267,6 +274,5 @@ class DistributedLlama(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
-    @torch.inference_mode()
     def generate(self, *args, **kwargs):
         return self.model.generate(*args, **kwargs)
