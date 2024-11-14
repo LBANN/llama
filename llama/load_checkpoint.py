@@ -14,6 +14,7 @@ def load_checkpoint(
     tp_rank: int,
     tp_world_size: int,
     device: torch.device,
+    io_threads: int = 4,
 ):
     """
     Loads a safetensors checkpoint from a folder with tensor and pipeline
@@ -39,11 +40,7 @@ def load_checkpoint(
 
     params = {k: v for k, v in model.named_parameters()}
 
-    # Every tensor parallel rank loads a different set of tensors and
-    # broadcasts them to the other ranks
-    # current_tp_index = 0
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=io_threads) as executor:
         futures = []
         for file in sorted(files):
             filepath = os.path.join(folder, file)

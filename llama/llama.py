@@ -31,6 +31,7 @@ class DistributedLlama(nn.Module):
         delay_init: bool = True,
         load_checkpoint: bool = False,
         seed: int = 0,
+        io_threads: int = 4,
     ):
         """
         Create a distributed Llama model.
@@ -42,6 +43,7 @@ class DistributedLlama(nn.Module):
         :param delay_init: Whether to delay initialization until after sharding weights, defaults to True
         :param load_checkpoint: Whether to load from a checkpoint, defaults to False
         :param seed: The random seed for initialization, defaults to 0
+        :param io_threads: The number of threads to use for loading tensors, defaults to 4
         """
         super().__init__()
         self.device_mesh = device_mesh
@@ -81,6 +83,13 @@ class DistributedLlama(nn.Module):
                 device_mesh.tp_rank(),
                 device_mesh.tp_size(),
                 device,
+                io_threads,
+            )
+
+        if hasattr(self.model.model.layers[0], "self_attn"):
+            print(
+                "Attention implementation:",
+                type(self.model.model.layers[0].self_attn).__name__,
             )
 
     def _shard_model(self):
