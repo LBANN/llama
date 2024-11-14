@@ -1,10 +1,11 @@
 import json
 import os
-from safetensors import safe_open
+from concurrent.futures import ThreadPoolExecutor
+
 import torch
-from torch import nn
-from torch.distributed.tensor import DTensor, distribute_tensor
 import tqdm
+from safetensors import safe_open
+from torch import nn
 
 
 def load_checkpoint(
@@ -42,17 +43,19 @@ def load_checkpoint(
     # broadcasts them to the other ranks
     # current_tp_index = 0
 
-    # Load the necessary files
-    for file in tqdm.tqdm(
-        sorted(files), desc="Loading necessary safetensors files", total=len(files)
-    ):
-        filepath = os.path.join(folder, file)
-        with safe_open(filepath, framework="pt", device=dev) as f:
-            for key in sorted(f.keys()):
-                if key in params:
-                    _load_tensor_fully_or_partially(
-                        f, key, params, tp_rank, tp_world_size
-                    )
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        for file in sorted(files):
+            filepath = os.path.join(folder, file)
+            futures.append(
+                executor.submit(
+                    _load_file, filepath, params, dev, tp_rank, tp_world_size
+                )
+            )
+        for future in tqdm.tqdm(
+            futures, desc="Loading necessary safetensors files", total=len(futures)
+        ):
+            future.result()
 
 
 def _intersect_tensors(model: nn.Module, available_tensors: dict[str, str]) -> set[str]:
@@ -64,6 +67,13 @@ def _intersect_tensors(model: nn.Module, available_tensors: dict[str, str]) -> s
         if pname in available_tensors:
             result.add(available_tensors[pname])
     return result
+
+
+def _load_file(filepath, params, device, tp_rank, tp_world_size):
+    with safe_open(filepath, framework="pt", device=device) as f:
+        for key in sorted(f.keys()):
+            if key in params:
+                _load_tensor_fully_or_partially(f, key, params, tp_rank, tp_world_size)
 
 
 def _load_tensor_fully_or_partially(
