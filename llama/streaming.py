@@ -19,6 +19,6 @@ class MasterRankTextStreamer(TextStreamer):
             return
         time_since_last_token = time.time() - self.last_time
         v = self.tokenizer.batch_decode(value, skip_special_tokens=True)
-        print(v[0], end='', flush=True)
+        print(v[0], end="", flush=True)
         self.time_per_token.append(time_since_last_token)
         self.last_time = time.time()

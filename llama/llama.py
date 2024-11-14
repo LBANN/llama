@@ -3,8 +3,7 @@ import math
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
@@ -14,7 +13,6 @@ from llama.parallel import (
     EmbedParallel,
     LlamaDeviceMesh,
     RowwiseParallel,
-    SequenceParallel,
     parallelize_module,
 )
 
