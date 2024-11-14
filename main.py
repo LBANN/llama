@@ -41,9 +41,6 @@ def main():
         f"Device mesh: rank={dist.get_rank()}, TP={device_mesh.tp_rank()}/{device_mesh.tp_size()}, PP={device_mesh.pp_rank()}/{device_mesh.pp_size()}"
     )
 
-    if args.compile and device_mesh.tp_size() > 1:
-        raise ValueError("torch.compile and tensor parallelism are mutually exclusive")
-
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     model = DistributedLlama(
         args.model_dir,
@@ -70,7 +67,7 @@ def main():
     output_streamer = MasterRankTextStreamer(tokenizer, skip_special_tokens=True)
 
     if args.compile:
-        model.model = torch.compile(model.model, mode="reduce-overhead")
+        model.model.forward = torch.compile(model.model.forward) #, mode="reduce-overhead")
 
     outputs = model.generate(
         **inputs,
