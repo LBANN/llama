@@ -12,6 +12,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 import argparse
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -59,6 +60,15 @@ def get_args(server: bool = False):
     return parser.parse_args()
 
 
+@dataclass
+class ControlInfo:
+    exit: bool = False
+    keepalive: bool = False
+    input_len: int = 0
+    max_new_tokens: int = 0
+    reset_kv_cache: bool = False
+
+
 def barrier(device):
     """
     A barrier that synchronizes all ranks and is compatible with DTensor.
@@ -67,13 +77,13 @@ def barrier(device):
     dist.all_reduce(torch.tensor(0, device=device), op=dist.ReduceOp.SUM)
 
 
-def chat_synchronize_ranks(inputs, input_len, device):
+def chat_synchronize_ranks(inputs, info, device):
     """
     Waits for all ranks to receive the input length of the next message.
     """
     barrier(device)
+    dist.broadcast_object_list(info, 0)
     dist.broadcast(inputs, 0)
-    dist.broadcast(input_len, 0)
 
 
 def chat_loop(
@@ -122,7 +132,7 @@ def chat_loop(
             # Ask for inputs only on the first rank
             if dist.get_rank() == 0:
                 if args.benchmark:
-                    message = 'benchmark'
+                    message = "benchmark"
                 else:
                     message = input("> ")
                 if message.strip() == "exit":
