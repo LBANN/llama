@@ -155,6 +155,9 @@ def chat_loop(
                 s_tok = torch.tensor(output_streamer.time_per_token)
                 print("\nMedian tokens/s:", 1 / s_tok.median().item())
                 output_streamer.time_per_token = []
+                gpu_memory = torch.cuda.memory_allocated() / 1024**3
+                total_gpu_memory = gpu_memory * dist.get_world_size()
+                print(f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]")
             # Benchmark only runs one iteration
             if args.benchmark:
                 break

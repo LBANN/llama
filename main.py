@@ -51,7 +51,9 @@ def main():
 
     # Print how much memory is used by the GPU
     if dist.get_rank() == 0 and (args.debug or args.benchmark):
-        print("Memory used:", torch.cuda.memory_allocated() / 1024**3, "GiB")
+        gpu_memory = torch.cuda.memory_allocated() / 1024**3
+        total_gpu_memory = gpu_memory * dist.get_world_size()
+        print(f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]")
 
     if args.compile:
         model.model.forward = torch.compile(
