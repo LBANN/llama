@@ -71,7 +71,7 @@ def generate_text(streamer, input_len, max_tokens):
     with lock:
         # Synchronize the input tokens and lengths
         control_info = ControlInfo(input_len=input_len, max_new_tokens=max_tokens)
-        chat_synchronize_ranks(inputs, [control_info], device)
+        chat_synchronize_ranks(inputs, device, control_info)
 
         # Generate text as a streaming response
         outputs = model.generate(
@@ -133,9 +133,7 @@ async def completions(request: Request):
 
 
 def event_loop():
-    info_list = [None]
-    chat_synchronize_ranks(inputs, info_list, device)
-    info: ControlInfo = info_list[0]
+    info: ControlInfo = chat_synchronize_ranks(inputs, device)
     while not info.exit:
         if not info.keepalive:
             outputs = model.generate(
@@ -147,8 +145,7 @@ def event_loop():
                 past_key_values=cache_manager.get_cache(inputs, info.input_len),
             )
             cache_manager.update(outputs)
-        chat_synchronize_ranks(inputs, info_list, device)
-        info = info_list[0]
+        info = chat_synchronize_ranks(inputs, device)
 
 
 @app.get("/models")
@@ -170,7 +167,7 @@ def keepalive_signal(inputs, device, lock, interval_minutes=5):
     while True:
         time.sleep(interval_minutes * 60)
         with lock:
-            chat_synchronize_ranks(inputs, [ControlInfo(keepalive=True)], device)
+            chat_synchronize_ranks(inputs, device, ControlInfo(keepalive=True))
 
 
 def main():
@@ -241,7 +238,7 @@ def main():
         print("Loop is over")
 
         # Tear down the process group
-        chat_synchronize_ranks(inputs, [ControlInfo(exit=True)], device)
+        chat_synchronize_ranks(inputs, device, ControlInfo(exit=True))
     else:
         # Other ranks participate in the chat server by waiting
         event_loop()

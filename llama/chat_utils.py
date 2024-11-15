@@ -125,13 +125,16 @@ def barrier(device):
     dist.all_reduce(torch.tensor(0, device=device), op=dist.ReduceOp.SUM)
 
 
-def chat_synchronize_ranks(inputs, info, device):
+def chat_synchronize_ranks(inputs, device, info=None):
     """
     Waits for all ranks to receive the input length of the next message.
     """
     barrier(device)
-    dist.broadcast_object_list(info, 0)
+    info_list = [info]
+    dist.broadcast_object_list(info_list, 0)
     dist.broadcast(inputs, 0)
+
+    return info_list[0]
 
 
 def chat_loop(
