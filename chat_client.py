@@ -32,6 +32,10 @@ def chat_loop(model: str, url: str):
             message = input("> ")
             if message.strip() == "exit":
                 raise EOFError
+            if message.strip() == "clear":
+                print("[Chat context cleared]")
+                conversation = []
+                continue
             conversation.append({"role": "user", "content": message})
 
             chat_completion = client.chat.completions.create(
@@ -48,7 +52,7 @@ def chat_loop(model: str, url: str):
             response_message = {"role": "assistant", "content": full_response}
             conversation.append(response_message)
     except EOFError:
-        pass
+        print("[Ending chat]")
 
 
 def main():
