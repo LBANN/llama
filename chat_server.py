@@ -24,13 +24,19 @@ from fastapi.responses import StreamingResponse
 from transformers import AutoTokenizer, TextStreamer
 
 from llama import DistributedLlama, LlamaDeviceMesh
-from llama.chat_utils import barrier, chat_synchronize_ranks, get_args, ControlInfo
+from llama.chat_utils import (
+    ControlInfo,
+    KVCacheManager,
+    barrier,
+    chat_synchronize_ranks,
+    get_args,
+)
 
 # Create a FastAPI app
 app = FastAPI()
 
 # Global variables
-inputs = model = tokenizer = lock = kv_cache = None
+inputs = model = tokenizer = lock = cache_manager = None
 device = torch.device("cuda:0")
 
 
@@ -64,20 +70,21 @@ class ChatServerTextStreamer(TextStreamer):
 def generate_text(streamer, input_len, max_tokens):
     with lock:
         # Synchronize the input tokens and lengths
-        chat_synchronize_ranks(
-            inputs,
-            [ControlInfo(input_len=input_len, max_new_tokens=max_tokens)],
-            device,
-        )
+        control_info = ControlInfo(input_len=input_len, max_new_tokens=max_tokens)
+        chat_synchronize_ranks(inputs, [control_info], device)
 
         # Generate text as a streaming response
-        model.generate(
+        outputs = model.generate(
             input_ids=inputs[:, :input_len],
             attention_mask=torch.ones((1, input_len), device=device),
             streamer=streamer,
             max_new_tokens=max_tokens,
             pad_token_id=tokenizer.eos_token_id,
+            past_key_values=cache_manager.get_cache(inputs, input_len),
         )
+
+        # Update the cached tokens
+        cache_manager.update(outputs)
 
         # Send signal to end the stream
         streamer.queue.put(None)
@@ -131,15 +138,17 @@ def event_loop():
     info: ControlInfo = info_list[0]
     while not info.exit:
         if not info.keepalive:
-            model.generate(
+            outputs = model.generate(
                 input_ids=inputs[:, : info.input_len],
                 attention_mask=torch.ones((1, info.input_len), device=device),
                 streamer=None,
                 max_new_tokens=info.max_new_tokens,
                 pad_token_id=tokenizer.eos_token_id,
+                past_key_values=cache_manager.get_cache(inputs, info.input_len),
             )
+            cache_manager.update(outputs)
         chat_synchronize_ranks(inputs, info_list, device)
-        info: ControlInfo = info_list[0]
+        info = info_list[0]
 
 
 @app.get("/models")
@@ -189,7 +198,7 @@ def main():
         device,
         device_mesh,
         delay_init=True,
-        load_checkpoint=False, #not args.benchmark,
+        load_checkpoint=not args.benchmark,
         io_threads=io_threads,
     )
     barrier(device)
@@ -207,6 +216,9 @@ def main():
 
     global inputs
     inputs = torch.full((1, 131072), 128002, dtype=torch.long, device=device)
+
+    global cache_manager
+    cache_manager = KVCacheManager()
 
     # Run the uvicorn server
     if dist.get_rank() == 0:

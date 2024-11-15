@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 from transformers import PreTrainedTokenizer
+from transformers.cache_utils import DynamicCache
 
 from llama import DistributedLlama
 from llama.streaming import MasterRankTextStreamer
@@ -66,7 +67,54 @@ class ControlInfo:
     keepalive: bool = False
     input_len: int = 0
     max_new_tokens: int = 0
-    reset_kv_cache: bool = False
+
+
+class CustomDynamicCache(DynamicCache):
+    """
+    A custom dynamic cache that keeps track of the sequence length from all layers.
+    The default implementation only keeps track of the sequence length for the first layer.
+    """
+
+    def get_seq_length(self, layer_idx: int = None) -> int:
+        if layer_idx is None:
+            if len(self.key_cache) == 0:
+                return 0
+            max_seq_length = max(
+                [
+                    layer_cache.shape[-2]
+                    for layer_cache in self.key_cache
+                    if len(layer_cache) > 0
+                ]
+            )
+            return max_seq_length
+
+        return super().get_seq_length(layer_idx)
+
+
+class KVCacheManager:
+    """
+    Manages the key-value cache for the model, keeping track of the previous tokens.
+    """
+
+    def __init__(self):
+        self.cached_tokens = None
+        self.kv_cache = CustomDynamicCache()
+
+    def get_cache(self, inputs, input_len):
+        if self.cached_tokens is not None:
+            # Check if the cache can be reused
+            cached_len = self.cached_tokens.shape[1]
+            if cached_len < input_len and torch.equal(
+                self.cached_tokens, inputs[:, :cached_len]
+            ):
+                return self.kv_cache
+            else:
+                self.cached_tokens = None
+                self.kv_cache = CustomDynamicCache()
+        return self.kv_cache
+
+    def update(self, outputs):
+        self.cached_tokens = outputs
 
 
 def barrier(device):
