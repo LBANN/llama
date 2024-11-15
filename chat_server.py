@@ -1,20 +1,23 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
 import json
-import uvicorn
+import queue
+import threading
+import time
 
 import torch
 import torch.distributed as dist
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 from transformers import AutoTokenizer, TextStreamer
 
 from llama import DistributedLlama, LlamaDeviceMesh
-from llama.chat_utils import get_args, barrier, chat_synchronize_ranks
+from llama.chat_utils import barrier, chat_synchronize_ranks, get_args
 
 # Create a FastAPI app
 app = FastAPI()
 
 # Global variables
-input_len = inputs = model = tokenizer = None
+input_len = inputs = model = tokenizer = lock = None
 device = torch.device("cuda:0")
 
 
@@ -23,23 +26,46 @@ class ChatServerTextStreamer(TextStreamer):
     Text streamer that interacts with a streaming response for a chat server.
     """
 
-    def __init__(self, tokenizer, skip_prompt=True, **decode_kwargs):
+    def __init__(self, tokenizer, queue, skip_prompt=True, **decode_kwargs):
         super().__init__(tokenizer, skip_prompt, **decode_kwargs)
+        self.queue = queue
+        self._prev_token = None
 
     def put(self, value):
         if self.skip_prompt and self.next_tokens_are_prompt:
             # Skip both the prompt and the content header (in LLaMA 3.1, the
-            # sequence separator is 128007)
+            # sequence separator is 128007 followed by '\n\n' which is 271)
             if (
-                value.shape[-1] == 1 and value.item() == 128007
+                value.shape[-1] == 1
             ):  # Skip until start of answer
-                self.next_tokens_are_prompt = False
+                if self._prev_token == 128007 and value.item() == 271:
+                    self.next_tokens_are_prompt = False
+                else:
+                    self._prev_token = value.item()
             return
 
         v = self.tokenizer.batch_decode(value, skip_special_tokens=True)
 
         response = {"choices": [{"delta": {"role": "assistant", "content": str(v[0])}}]}
-        yield f"data: {json.dumps(response)}\n\n"
+        self.queue.put(f"data: {json.dumps(response)}\n\n")
+
+
+def generate_text(streamer, max_tokens):
+    with lock:
+        # Synchronize the input tokens and lengths
+        chat_synchronize_ranks(inputs, input_len, device)
+
+        # Generate text as a streaming response
+        model.generate(
+            input_ids=inputs[:, : input_len[0]],
+            attention_mask=torch.ones((1, input_len[0]), device=device),
+            streamer=streamer,
+            max_new_tokens=max_tokens,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+        # Send signal to end the stream
+        streamer.queue.put(None)
 
 
 # Define a route for OpenAI API compatibility
@@ -49,7 +75,6 @@ async def completions(request: Request):
     request_body = await request.json()
 
     # Handle the request
-    # print(request_body)
     messages = request_body.get("messages", [])
     max_tokens = request_body.get("max_tokens", 512)
     stream = request_body.get("stream", False)
@@ -62,23 +87,25 @@ async def completions(request: Request):
     input_len[0] = actual_inputs.shape[-1]
     input_len[1] = max_tokens
 
-    # Synchronize the input tokens and lengths
-    chat_synchronize_ranks(inputs, input_len, device)
+    streamer_queue = queue.Queue()
+    streamer = ChatServerTextStreamer(tokenizer, streamer_queue)
 
-    # Generate text as a streaming response
-    def generate_text():
-        yield from model.generate(
-            input_ids=inputs[:, : input_len[0]],
-            attention_mask=torch.ones((1, input_len[0]), device=device),
-            streamer=ChatServerTextStreamer(tokenizer),
-            max_new_tokens=max_tokens,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    # Generate text
+    threading.Thread(
+        target=generate_text, args=(streamer, max_tokens), daemon=True
+    ).start()
+
+    def content_stream():
+        while True:
+            res = streamer_queue.get()
+            if res is None:
+                break
+            yield res
 
     # Return a streaming response
     if stream:
         return StreamingResponse(
-            content=generate_text(), media_type="text/event-stream"
+            content=content_stream(), media_type="text/event-stream"
         )
     else:
         raise NotImplementedError("Non-streaming completions are not supported")
@@ -86,14 +113,15 @@ async def completions(request: Request):
 
 def event_loop():
     chat_synchronize_ranks(inputs, input_len, device)
-    while input_len[0] > 0:
-        model.generate(
-            input_ids=inputs[:, : input_len[0]],
-            attention_mask=torch.ones((1, input_len[0]), device=device),
-            streamer=None,
-            max_new_tokens=input_len[1],
-            pad_token_id=tokenizer.eos_token_id,
-        )
+    while input_len[0] >= 0:
+        if input_len[0] > 0:
+            model.generate(
+                input_ids=inputs[:, : input_len[0]],
+                attention_mask=torch.ones((1, input_len[0]), device=device),
+                streamer=None,
+                max_new_tokens=input_len[1],
+                pad_token_id=tokenizer.eos_token_id,
+            )
         chat_synchronize_ranks(inputs, input_len, device)
 
 
@@ -108,6 +136,17 @@ async def models():
             },
         ]
     }
+
+
+def keepalive_signal(inputs, input_len, device, lock, interval_minutes=5):
+    """Send a keepalive signal from rank 0 to other ranks every `interval_minutes`."""
+    inputs = torch.empty_like(inputs)
+    input_len = torch.empty_like(input_len)
+    input_len[0] = 0
+    while True:
+        time.sleep(interval_minutes * 60)
+        with lock:
+            chat_synchronize_ranks(inputs, input_len, device)
 
 
 def main():
@@ -157,6 +196,15 @@ def main():
 
     # Run the uvicorn server
     if dist.get_rank() == 0:
+        # Start the keepalive thread
+        global lock
+        lock = threading.Lock()
+        keepalive_thread = threading.Thread(
+            target=keepalive_signal, args=(inputs, input_len, device, lock)
+        )
+        keepalive_thread.daemon = True
+        keepalive_thread.start()
+
         # Detect the hostname and print it
         import socket
 
@@ -167,7 +215,7 @@ def main():
         print("Loop is over")
 
         # Tear down the process group
-        input_len[0] = 0
+        input_len[0] = -1
         chat_synchronize_ranks(inputs, input_len, device)
     else:
         # Other ranks participate in the chat server by waiting
