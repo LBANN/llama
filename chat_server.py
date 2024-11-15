@@ -11,7 +11,6 @@
 # https://github.com/LBANN and https://github.com/LLNL/LBANN.
 #
 # SPDX-License-Identifier: (Apache-2.0)
-
 import json
 import queue
 import threading
