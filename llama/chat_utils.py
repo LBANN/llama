@@ -121,7 +121,10 @@ def chat_loop(
         while True:
             # Ask for inputs only on the first rank
             if dist.get_rank() == 0:
-                message = input("> ")
+                if args.benchmark:
+                    message = 'benchmark'
+                else:
+                    message = input("> ")
                 if message.strip() == "exit":
                     raise EOFError
 
