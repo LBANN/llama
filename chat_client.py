@@ -25,6 +25,7 @@ def chat_loop(model: str, url: str):
     print(
         "Type a message to start the chat.",
         "Press ctrl-D or type 'exit' to end the conversation.",
+        "Type 'clear' to clear the chat context.",
     )
 
     try:
