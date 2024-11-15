@@ -12,9 +12,10 @@ networks with massive amounts of data.  LBANN is able to advantage of
 tightly-coupled accelerators, low-latency high-bandwidth networking,
 and high-bandwidth parallel file systems.
 
-## <TEMPLATE> Repository
+## LLaMa Repository
 
-<REPLACE ME>
+Distributed implementation of the LLaMa 3.x model.  Optimzied to allow both
+pipeline and tensor parallel inference execution using PyTorch.
 
 ## Publications
 
