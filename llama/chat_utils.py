@@ -159,7 +159,6 @@ def chat_loop(
     # Keep memory buffers for messages and inputs
     messages = []
     inputs = torch.full((1, 131072), 128002, dtype=torch.long, device=device)
-    input_len = torch.zeros((1,), dtype=torch.long, device=device)
 
     if args.debug and dist.get_rank() == 0:
         print("Warming up...")
@@ -181,6 +180,7 @@ def chat_loop(
         # Loop forever
         while True:
             # Ask for inputs only on the first rank
+            info = None
             if dist.get_rank() == 0:
                 if args.benchmark:
                     message = "benchmark"
@@ -195,17 +195,17 @@ def chat_loop(
                     return_tensors="pt",
                 ).to(device)
                 inputs[0, : actual_inputs.shape[-1]] = actual_inputs
-                input_len[0] = actual_inputs.shape[-1]
+                info = ControlInfo(input_len=actual_inputs.shape[-1])
 
             # Synchronize the input tokens and lengths
-            chat_synchronize_ranks(inputs, input_len, device)
-            if input_len[0] == 0:
+            info = chat_synchronize_ranks(inputs, device, info)
+            if info.exit:
                 break
 
             # The crux of the chat loop: generate the response
             model.generate(
-                input_ids=inputs[:, : input_len[0]],
-                attention_mask=torch.ones((1, input_len[0]), device=device),
+                input_ids=inputs[:, : info.input_len],
+                attention_mask=torch.ones((1, info.input_len), device=device),
                 streamer=output_streamer,
                 max_new_tokens=10 if args.benchmark else args.max_tokens_per_response,
                 pad_token_id=tokenizer.eos_token_id,
@@ -229,5 +229,4 @@ def chat_loop(
         # Broadcast zeros to finalize the rest of the ranks
         if dist.get_rank() == 0:
             print("[Ending chat]")
-            input_len[:] = 0
-            chat_synchronize_ranks(inputs, input_len, device)
+            chat_synchronize_ranks(inputs, device, ControlInfo(exit=True))
