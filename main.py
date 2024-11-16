@@ -11,13 +11,21 @@
 # https://github.com/LBANN and https://github.com/LLNL/LBANN.
 #
 # SPDX-License-Identifier: (Apache-2.0)
+from psutil import Process
+
+# Save affinity
+affinity = Process().cpu_affinity()
+
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
 from llama import DistributedLlama, LlamaDeviceMesh
-from llama.streaming import MasterRankTextStreamer
 from llama.chat_utils import *
+from llama.streaming import MasterRankTextStreamer
+
+# Restore affinity
+Process().cpu_affinity(affinity)
 
 
 def main():
@@ -53,7 +61,9 @@ def main():
     if dist.get_rank() == 0 and (args.debug or args.benchmark):
         gpu_memory = torch.cuda.memory_allocated() / 1024**3
         total_gpu_memory = gpu_memory * dist.get_world_size()
-        print(f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]")
+        print(
+            f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]"
+        )
 
     if args.compile:
         model.model.forward = torch.compile(

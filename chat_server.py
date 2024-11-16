@@ -11,6 +11,11 @@
 # https://github.com/LBANN and https://github.com/LLNL/LBANN.
 #
 # SPDX-License-Identifier: (Apache-2.0)
+from psutil import Process
+
+# Save affinity
+affinity = Process().cpu_affinity()
+
 import json
 import queue
 import threading
@@ -31,6 +36,9 @@ from llama.chat_utils import (
     chat_synchronize_ranks,
     get_args,
 )
+
+# Restore affinity
+Process().cpu_affinity(affinity)
 
 # Create a FastAPI app
 app = FastAPI()
