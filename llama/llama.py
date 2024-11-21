@@ -17,6 +17,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
+from transformers.generation import GenerationConfig
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
@@ -68,6 +69,9 @@ class DistributedLlama(nn.Module):
                 name_or_path, torch_dtype=dtype, attn_implementation="sdpa"
             )
             self.model = LlamaForCausalLM(config)
+            self.model.generation_config = GenerationConfig.from_pretrained(
+                name_or_path
+            )
             self.model.to(dtype)
             self.model.eval()
 
