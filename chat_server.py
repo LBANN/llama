@@ -44,7 +44,7 @@ Process().cpu_affinity(affinity)
 app = FastAPI()
 
 # Global variables
-inputs = model = tokenizer = lock = cache_manager = None
+inputs = model = tokenizer = gen_queue = cache_manager = None
 device = torch.device("cuda:0")
 
 
@@ -75,35 +75,6 @@ class ChatServerTextStreamer(TextStreamer):
         self.queue.put(f"data: {json.dumps(response)}\n\n")
 
 
-def generate_text(streamer, input_len, max_tokens, settings):
-    with lock:
-        # Synchronize the input tokens and lengths
-        control_info = ControlInfo(
-            input_len=input_len,
-            max_new_tokens=max_tokens,
-            temperature=settings.get("temperature", None),
-        )
-        chat_synchronize_ranks(inputs, device, control_info)
-        kwargs = control_info.to_kwargs()
-
-        # Generate text as a streaming response
-        outputs = model.generate(
-            input_ids=inputs[:, :input_len],
-            attention_mask=torch.ones((1, input_len), device=device),
-            streamer=streamer,
-            max_new_tokens=max_tokens,
-            pad_token_id=tokenizer.eos_token_id,
-            past_key_values=cache_manager.get_cache(inputs, input_len),
-            **kwargs,
-        )
-
-        # Update the cached tokens
-        cache_manager.update(outputs)
-
-        # Send signal to end the stream
-        streamer.queue.put(None)
-
-
 # Define a route for OpenAI API compatibility
 @app.post("/chat/completions")
 async def completions(request: Request):
@@ -127,13 +98,7 @@ async def completions(request: Request):
 
     streamer_queue = queue.Queue()
     streamer = ChatServerTextStreamer(tokenizer, streamer_queue)
-
-    # Generate text
-    threading.Thread(
-        target=generate_text,
-        args=(streamer, input_len, max_tokens, settings),
-        daemon=True,
-    ).start()
+    gen_queue.put((input_len, max_tokens, settings, streamer))
 
     def content_stream():
         while True:
@@ -151,25 +116,6 @@ async def completions(request: Request):
         raise NotImplementedError("Non-streaming completions are not supported")
 
 
-def event_loop():
-    info: ControlInfo = chat_synchronize_ranks(inputs, device)
-    while not info.exit:
-        if not info.keepalive:
-            kwargs = info.to_kwargs()
-
-            outputs = model.generate(
-                input_ids=inputs[:, : info.input_len],
-                attention_mask=torch.ones((1, info.input_len), device=device),
-                streamer=None,
-                max_new_tokens=info.max_new_tokens,
-                pad_token_id=tokenizer.eos_token_id,
-                past_key_values=cache_manager.get_cache(inputs, info.input_len),
-                **kwargs,
-            )
-            cache_manager.update(outputs)
-        info = chat_synchronize_ranks(inputs, device)
-
-
 @app.get("/models")
 async def models():
     return {
@@ -183,13 +129,66 @@ async def models():
     }
 
 
-def keepalive_signal(inputs, device, lock, interval_minutes=5):
-    """Send a keepalive signal from rank 0 to other ranks every `interval_minutes`."""
-    inputs = torch.empty_like(inputs)
+def master_loop(inputs, device, gen_queue, interval_minutes=5):
+    cache_manager = KVCacheManager(model)
     while True:
-        time.sleep(interval_minutes * 60)
-        with lock:
+        try:
+            task = gen_queue.get(timeout=interval_minutes * 60)
+            # Check for shutdown signal
+            if task is None:
+                chat_synchronize_ranks(inputs, device, ControlInfo(exit=True))
+                return
+            input_len, max_tokens, settings, streamer = task
+
+            # Synchronize the input tokens and lengths
+            control_info = ControlInfo(
+                input_len=input_len,
+                max_new_tokens=max_tokens,
+                temperature=settings.get("temperature", None),
+            )
+            chat_synchronize_ranks(inputs, device, control_info)
+            kwargs = control_info.to_kwargs()
+
+            # Generate text as a streaming response
+            outputs = model.generate(
+                input_ids=inputs[:, :input_len],
+                attention_mask=torch.ones((1, input_len), device=device),
+                streamer=streamer,
+                max_new_tokens=max_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+                past_key_values=cache_manager.get_cache(inputs, input_len, max_tokens),
+                **kwargs,
+            )
+
+            # Update the cached tokens
+            cache_manager.update(outputs)
+
+            # Send signal to end the stream
+            streamer.queue.put(None)
+        except queue.Empty:
+            # Send a keepalive signal
             chat_synchronize_ranks(inputs, device, ControlInfo(keepalive=True))
+
+
+def worker_loop():
+    info: ControlInfo = chat_synchronize_ranks(inputs, device)
+    while not info.exit:
+        if not info.keepalive:
+            kwargs = info.to_kwargs()
+
+            outputs = model.generate(
+                input_ids=inputs[:, : info.input_len],
+                attention_mask=torch.ones((1, info.input_len), device=device),
+                streamer=None,
+                max_new_tokens=info.max_new_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+                past_key_values=cache_manager.get_cache(
+                    inputs, info.input_len, info.max_new_tokens
+                ),
+                **kwargs,
+            )
+            cache_manager.update(outputs)
+        info = chat_synchronize_ranks(inputs, device)
 
 
 def main():
@@ -222,33 +221,27 @@ def main():
     )
     barrier(device)
 
-    # Warm up the model
-    if args.debug and dist.get_rank() == 0:
-        print("Warming up...")
-    model.generate(
-        input_ids=torch.full((1, 128), 128002, dtype=torch.long, device=device),
-        attention_mask=torch.ones((1, 128), device=device),
-        streamer=None,
-        max_new_tokens=1,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-
     global inputs
     inputs = torch.full((1, 131072), 128002, dtype=torch.long, device=device)
 
     global cache_manager
-    cache_manager = KVCacheManager()
+    cache_manager = KVCacheManager(model)
+
+    if args.compile:
+        model.model.original_forward = model.model.forward
+        model.model.compiled_forward = torch.compile(
+            model.model.forward, mode="reduce-overhead", fullgraph=True
+        )
 
     # Run the uvicorn server
     if dist.get_rank() == 0:
         # Start the keepalive thread
-        global lock
-        lock = threading.Lock()
-        keepalive_thread = threading.Thread(
-            target=keepalive_signal, args=(inputs, device, lock)
+        global gen_queue
+        gen_queue = queue.Queue()
+        gen_thread = threading.Thread(
+            target=master_loop, args=(inputs, device, gen_queue), daemon=True
         )
-        keepalive_thread.daemon = True
-        keepalive_thread.start()
+        gen_thread.start()
 
         # Detect the hostname and print it
         import socket
@@ -259,11 +252,11 @@ def main():
 
         print("Loop is over")
 
-        # Tear down the process group
-        chat_synchronize_ranks(inputs, device, ControlInfo(exit=True))
+        # Send shutdown signal to main thread
+        gen_queue.put(None)
     else:
         # Other ranks participate in the chat server by waiting
-        event_loop()
+        worker_loop()
 
 
 # Run the app
