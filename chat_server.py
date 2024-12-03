@@ -63,16 +63,25 @@ class ChatServerTextStreamer(TextStreamer):
             # Skip both the prompt and the content header (in LLaMA 3.1, the
             # sequence separator is 128007 followed by '\n\n' which is 271)
             if value.shape[-1] == 1:  # Skip until start of answer
-                if self._prev_token == 128007 and value.item() == 271:
+                if self._prev_token is None and value.item() < 128000:
                     self.next_tokens_are_prompt = False
+                elif self._prev_token == 128007 and value.item() == 271:
+                    self.next_tokens_are_prompt = False
+                    return
                 else:
                     self._prev_token = value.item()
-            return
+                    return
+            else:
+                return
 
         v = self.tokenizer.batch_decode(value, skip_special_tokens=True)
 
         response = {"choices": [{"delta": {"role": "assistant", "content": str(v[0])}}]}
         self.queue.put(f"data: {json.dumps(response)}\n\n")
+
+    def on_finalized_text(self, _: str, stream_end: bool = False):
+        if stream_end:
+            self._prev_token = None
 
 
 def generate_text(streamer, input_len, max_tokens, settings):
