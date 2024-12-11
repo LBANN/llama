@@ -27,6 +27,7 @@ class MasterRankTextStreamer(TextStreamer):
         self.time_per_token = []
         self.last_time = time.time()
         self.last_message = ""
+        self._prev_token = None
 
     def clear_last_message(self):
         self.last_message = ""
@@ -36,12 +37,18 @@ class MasterRankTextStreamer(TextStreamer):
             return
         if self.skip_prompt and self.next_tokens_are_prompt:
             # Skip both the prompt and the content header (in LLaMA 3.1, the
-            # sequence separator is 128007)
-            if (
-                value.shape[-1] == 1 and value.item() == 128007
-            ):  # Skip until start of answer
-                self.next_tokens_are_prompt = False
-            return
+            # sequence separator is 128007 followed by '\n\n' which is 271)
+            if value.shape[-1] == 1:  # Skip until start of answer
+                if self._prev_token is None and value.item() < 128000:
+                    self.next_tokens_are_prompt = False
+                elif self._prev_token == 128007 and value.item() == 271:
+                    self.next_tokens_are_prompt = False
+                    return
+                else:
+                    self._prev_token = value.item()
+                    return
+            else:
+                return
 
         time_since_last_token = time.time() - self.last_time
         v = self.tokenizer.batch_decode(value, skip_special_tokens=True)
@@ -49,3 +56,7 @@ class MasterRankTextStreamer(TextStreamer):
         print(v[0], end="", flush=True)
         self.time_per_token.append(time_since_last_token)
         self.last_time = time.time()
+
+    def on_finalized_text(self, _: str, stream_end: bool = False):
+        if stream_end:
+            self._prev_token = None
