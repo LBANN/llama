@@ -16,6 +16,7 @@ from psutil import Process
 # Save affinity
 affinity = Process().cpu_affinity()
 
+import asyncio
 import json
 import queue
 import threading
@@ -31,6 +32,7 @@ from transformers import AutoTokenizer, TextStreamer
 from llama import DistributedLlama, LlamaDeviceMesh
 from llama.chat_utils import (
     ControlInfo,
+    ControlMessageType,
     KVCacheManager,
     barrier,
     chat_synchronize_ranks,
@@ -53,12 +55,25 @@ class ChatServerTextStreamer(TextStreamer):
     Text streamer that interacts with a streaming response for a chat server.
     """
 
-    def __init__(self, tokenizer, queue, skip_prompt=True, **decode_kwargs):
+    def __init__(
+        self, tokenizer, queue, message_queue, skip_prompt=True, **decode_kwargs
+    ):
         super().__init__(tokenizer, skip_prompt, **decode_kwargs)
         self.queue = queue
+        self.message_queue = message_queue
         self._prev_token = None
 
     def put(self, value):
+        # Peek at the message queue to see if there are any outstanding messages
+        if not self.message_queue.empty():
+            self.message_queue.get()
+            chat_synchronize_ranks(
+                inputs, device, ControlInfo(message=ControlMessageType.CANCEL)
+            )
+            raise StopIteration
+        else:
+            chat_synchronize_ranks(inputs, device)
+
         if self.skip_prompt and self.next_tokens_are_prompt:
             # Skip both the prompt and the content header (in LLaMA 3.1, the
             # sequence separator is 128007 followed by '\n\n' which is 271)
@@ -86,19 +101,23 @@ def generate_text(streamer, input_len, max_tokens, settings):
         chat_synchronize_ranks(inputs, device, control_info)
         kwargs = control_info.to_kwargs()
 
-        # Generate text as a streaming response
-        outputs = model.generate(
-            input_ids=inputs[:, :input_len],
-            attention_mask=torch.ones((1, input_len), device=device),
-            streamer=streamer,
-            max_new_tokens=max_tokens,
-            pad_token_id=tokenizer.eos_token_id,
-            past_key_values=cache_manager.get_cache(inputs, input_len),
-            **kwargs,
-        )
+        try:
+            # Generate text as a streaming response
+            outputs = model.generate(
+                input_ids=inputs[:, :input_len],
+                attention_mask=torch.ones((1, input_len), device=device),
+                streamer=streamer,
+                max_new_tokens=max_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+                past_key_values=cache_manager.get_cache(inputs, input_len),
+                **kwargs,
+            )
 
-        # Update the cached tokens
-        cache_manager.update(outputs)
+            # Update the cached tokens
+            cache_manager.update(outputs)
+
+        except StopIteration:  # Chat interrupted
+            pass
 
         # Send signal to end the stream
         streamer.queue.put(None)
@@ -126,7 +145,8 @@ async def completions(request: Request):
     input_len = actual_inputs.shape[-1]
 
     streamer_queue = queue.Queue()
-    streamer = ChatServerTextStreamer(tokenizer, streamer_queue)
+    message_queue = queue.Queue()
+    streamer = ChatServerTextStreamer(tokenizer, streamer_queue, message_queue)
 
     # Generate text
     threading.Thread(
@@ -135,38 +155,77 @@ async def completions(request: Request):
         daemon=True,
     ).start()
 
-    def content_stream():
-        while True:
-            res = streamer_queue.get()
-            if res is None:
-                break
-            yield res
+    async def content_stream(request: Request):
+        try:
+            while True:
+                # Check if the client has disconnected
+                if await request.is_disconnected():
+                    print("Client has disconnected")
+                    message_queue.put(None)
+                    streamer_queue.get()  # Get final signal
+                    break
+
+                res = streamer_queue.get()
+                if res is None:
+                    break
+                yield res
+
+        except asyncio.CancelledError:
+            print("Chat stream was interrupted")
+            message_queue.put(None)
+            streamer_queue.get()  # Get final signal
 
     # Return a streaming response
     if stream:
         return StreamingResponse(
-            content=content_stream(), media_type="text/event-stream"
+            content=content_stream(request), media_type="text/event-stream"
         )
     else:
         raise NotImplementedError("Non-streaming completions are not supported")
 
 
+class EventLoopTextStreamer(TextStreamer):
+    """
+    Event loop streamer, which is called on every token generated in the generate
+    call below. This streamer is used to synchronize ranks and handle control
+    messages, in order to gracefully exit the chat loop.
+    """
+
+    def put(self, value):
+        # Synchronize every token
+        info: ControlInfo = chat_synchronize_ranks(inputs, device)
+        if info is not None:
+            if info.message == ControlMessageType.CANCEL:
+                raise StopIteration(info)
+            elif info.message == ControlMessageType.KEEPALIVE:
+                # Skip keepalive messages
+                return
+            elif info.message == ControlMessageType.EXIT:
+                raise StopIteration(info)
+
+
 def event_loop():
     info: ControlInfo = chat_synchronize_ranks(inputs, device)
-    while not info.exit:
-        if not info.keepalive:
+    while info.message != ControlMessageType.EXIT:
+        if info.message != ControlMessageType.KEEPALIVE:
             kwargs = info.to_kwargs()
 
-            outputs = model.generate(
-                input_ids=inputs[:, : info.input_len],
-                attention_mask=torch.ones((1, info.input_len), device=device),
-                streamer=None,
-                max_new_tokens=info.max_new_tokens,
-                pad_token_id=tokenizer.eos_token_id,
-                past_key_values=cache_manager.get_cache(inputs, info.input_len),
-                **kwargs,
-            )
-            cache_manager.update(outputs)
+            try:
+                outputs = model.generate(
+                    input_ids=inputs[:, : info.input_len],
+                    attention_mask=torch.ones((1, info.input_len), device=device),
+                    streamer=EventLoopTextStreamer(tokenizer),
+                    max_new_tokens=info.max_new_tokens,
+                    pad_token_id=tokenizer.eos_token_id,
+                    past_key_values=cache_manager.get_cache(inputs, info.input_len),
+                    **kwargs,
+                )
+                cache_manager.update(outputs)
+            except StopIteration as ex:  # Chat interrupted
+                info = ex.value
+                if info is not None and info.message == ControlMessageType.EXIT:
+                    break
+
         info = chat_synchronize_ranks(inputs, device)
 
 
@@ -189,7 +248,9 @@ def keepalive_signal(inputs, device, lock, interval_minutes=5):
     while True:
         time.sleep(interval_minutes * 60)
         with lock:
-            chat_synchronize_ranks(inputs, device, ControlInfo(keepalive=True))
+            chat_synchronize_ranks(
+                inputs, device, ControlInfo(message=ControlMessageType.KEEPALIVE)
+            )
 
 
 def main():
@@ -260,7 +321,9 @@ def main():
         print("Loop is over")
 
         # Tear down the process group
-        chat_synchronize_ranks(inputs, device, ControlInfo(exit=True))
+        chat_synchronize_ranks(
+            inputs, device, ControlInfo(message=ControlMessageType.EXIT)
+        )
     else:
         # Other ranks participate in the chat server by waiting
         event_loop()

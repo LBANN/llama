@@ -13,6 +13,7 @@
 # SPDX-License-Identifier: (Apache-2.0)
 import argparse
 from dataclasses import dataclass
+from enum import Enum
 
 import torch
 import torch.distributed as dist
@@ -61,10 +62,16 @@ def get_args(server: bool = False):
     return parser.parse_args()
 
 
+class ControlMessageType(Enum):
+    NORMAL = 0
+    EXIT = 1
+    KEEPALIVE = 2
+    CANCEL = 3
+
+
 @dataclass
 class ControlInfo:
-    exit: bool = False
-    keepalive: bool = False
+    message: ControlMessageType = ControlMessageType.NORMAL
     input_len: int = 0
     max_new_tokens: int = 0
     temperature: float = None
@@ -207,7 +214,7 @@ def chat_loop(
 
             # Synchronize the input tokens and lengths
             info = chat_synchronize_ranks(inputs, device, info)
-            if info.exit:
+            if info.message == ControlMessageType.EXIT:
                 break
 
             # The crux of the chat loop: generate the response
@@ -226,7 +233,9 @@ def chat_loop(
                 output_streamer.time_per_token = []
                 gpu_memory = torch.cuda.memory_allocated() / 1024**3
                 total_gpu_memory = gpu_memory * dist.get_world_size()
-                print(f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]")
+                print(
+                    f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]"
+                )
             # Benchmark only runs one iteration
             if args.benchmark:
                 break
@@ -240,4 +249,6 @@ def chat_loop(
         # Broadcast zeros to finalize the rest of the ranks
         if dist.get_rank() == 0:
             print("[Ending chat]")
-            chat_synchronize_ranks(inputs, device, ControlInfo(exit=True))
+            chat_synchronize_ranks(
+                inputs, device, ControlInfo(message=ControlMessageType.EXIT)
+            )

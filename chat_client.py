@@ -79,9 +79,11 @@ def chat_loop(model: str, url: str, args):
                     continue
                 elif command.startswith("cq "):
                     if args.custom_prompt is None:
-                        print("[Error: a custom prompt has not been provided, use --custom-prompt]")
+                        print(
+                            "[Error: a custom prompt has not been provided, use --custom-prompt]"
+                        )
                         continue
-                    message = command[len("cq "):]
+                    message = command[len("cq ") :]
                     new_message = open(args.custom_prompt, "r").read()
                     new_message += message + "]"
                     message = new_message
@@ -99,12 +101,16 @@ def chat_loop(model: str, url: str, args):
                 max_tokens=args.max_tokens,
             )
             full_response = ""
-            for chunk in chat_completion:
-                if chunk.choices[0].delta.content is not None:
-                    full_response += chunk.choices[0].delta.content
-                    print(chunk.choices[0].delta.content, end="", flush=True)
+            try:
+                for chunk in chat_completion:
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                        print(chunk.choices[0].delta.content, end="", flush=True)
+                print()
+            except KeyboardInterrupt:  # Catch ctrl-C
+                chat_completion.close()
+                print("\n[Response interrupted]")
 
-            print()
             full_response += "\n"
             response_message = {"role": "assistant", "content": full_response}
             conversation.append(response_message)
@@ -118,7 +124,6 @@ def main():
     parser.add_argument("--url", type=str, default="http://localhost:8123")
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--custom-prompt", type=str, default=None)
-
 
     args = parser.parse_args()
     chat_loop(args.model, args.url, args)
