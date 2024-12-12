@@ -124,12 +124,18 @@ class KVCacheManager:
             ):
                 return self.kv_cache
             else:
-                self.cached_tokens = None
-                self.kv_cache = CustomDynamicCache()
+                self.clear()
+
         return self.kv_cache
 
     def update(self, outputs):
         self.cached_tokens = outputs
+
+    def clear(self):
+        del self.cached_tokens
+        del self.kv_cache
+        self.cached_tokens = None
+        self.kv_cache = CustomDynamicCache()
 
 
 def barrier(device):

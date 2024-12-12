@@ -117,7 +117,8 @@ def generate_text(streamer, input_len, max_tokens, settings):
             cache_manager.update(outputs)
 
         except StopIteration:  # Chat interrupted
-            pass
+            # Clear KV cache on interruption
+            cache_manager.clear()
 
         # Send signal to end the stream
         streamer.queue.put(None)
@@ -225,6 +226,9 @@ def event_loop():
                 info = ex.value
                 if info is not None and info.message == ControlMessageType.EXIT:
                     break
+                elif info is not None and info.message == ControlMessageType.CANCEL:
+                    # Clear KV cache on interruption
+                    cache_manager.clear()
 
         info = chat_synchronize_ranks(inputs, device)
 
