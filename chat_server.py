@@ -156,42 +156,56 @@ async def completions(request: Request):
 
     streamer_queue = queue.Queue()
     message_queue = queue.Queue()
+    # Streaming mode
     streamer = ChatServerTextStreamer(tokenizer, streamer_queue, message_queue)
 
-    # Generate text
+    # Generate text in a separate thread
     threading.Thread(
         target=generate_text,
         args=(streamer, input_len, max_tokens, settings),
         daemon=True,
     ).start()
 
-    async def content_stream(request: Request):
-        try:
-            while True:
-                # Check if the client has disconnected
-                if await request.is_disconnected():
-                    print("Client has disconnected")
-                    message_queue.put(None)
-                    streamer_queue.get()  # Get final signal
-                    break
-
-                res = streamer_queue.get()
-                if res is None:
-                    break
-                yield res
-
-        except asyncio.CancelledError:
-            print("Chat stream was interrupted")
-            message_queue.put(None)
-            streamer_queue.get()  # Get final signal
-
     # Return a streaming response
     if stream:
+        async def content_stream(request: Request):
+            try:
+                while True:
+                    # Check if the client has disconnected
+                    if await request.is_disconnected():
+                        print("Client has disconnected")
+                        message_queue.put(None)
+                        streamer_queue.get()  # Get final signal
+                        break
+
+                    res = streamer_queue.get()
+                    if res is None:
+                        break
+                    yield res
+
+            except asyncio.CancelledError:
+                print("Chat stream was interrupted")
+                message_queue.put(None)
+                streamer_queue.get()  # Get final signal
+
+        # Return a streaming response
         return StreamingResponse(
             content=content_stream(request), media_type="text/event-stream"
         )
     else:
-        raise NotImplementedError("Non-streaming completions are not supported")
+        strip_str = 'data: {"choices": [{"delta": {"role": "assistant", "content": "'
+        outputs = []
+        # Collect all outputs
+        while True:
+            res = streamer_queue.get()
+            if res is None:
+                break
+            # res is a string that looks like a json object e.g.
+            # res = 'data: {"choices": [{"delta": {"role": "assistant", "content": "?"}}]}'
+            # but we want to store just the content
+            outputs.append(res.split(strip_str)[1][:-7])
+        # Return the collected outputs as a single response
+        return {"choices": [{"message": "".join(outputs)}]}
 
 
 class EventLoopTextStreamer(TextStreamer):
