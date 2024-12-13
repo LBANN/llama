@@ -14,7 +14,8 @@ dependencies = ["torch>=2.5",
                "tokenizers",
                "safetensors",
                "openai",
-               "accelerate"]
+               "accelerate",
+               "fastapi",]
 
 [project.urls]
 Repository = "https://github.com/LBANN/llama.git"
