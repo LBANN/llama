@@ -14,6 +14,7 @@
 """
 A simple streaming chat client based on the openai library.
 """
+
 import argparse
 import openai
 

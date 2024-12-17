@@ -66,9 +66,7 @@ def main():
         )
 
     if args.compile:
-        model.model.forward = torch.compile(
-            model.model.forward
-        )  # , mode="reduce-overhead")
+        model.model.forward = torch.compile(model.model.forward, mode="reduce-overhead")
 
     output_streamer = MasterRankTextStreamer(
         tokenizer, skip_special_tokens=True, skip_prompt=not args.benchmark

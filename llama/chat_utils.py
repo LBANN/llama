@@ -12,13 +12,15 @@
 #
 # SPDX-License-Identifier: (Apache-2.0)
 import argparse
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 
 import torch
 import torch.distributed as dist
 from transformers import PreTrainedTokenizer
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import DynamicCache, StaticCache
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 from llama import DistributedLlama
 from llama.streaming import MasterRankTextStreamer
@@ -84,7 +86,7 @@ class ControlInfo:
         return result
 
 
-class CustomDynamicCache(DynamicCache):
+class PipelineDynamicCache(DynamicCache):
     """
     A custom dynamic cache that keeps track of the sequence length from all layers.
     The default implementation only keeps track of the sequence length for the first layer.
@@ -106,25 +108,100 @@ class CustomDynamicCache(DynamicCache):
         return super().get_seq_length(layer_idx)
 
 
+class PipelineStaticCache(StaticCache):
+    """
+    A custom static cache that only caches the key and value states for layers that have not been
+    pipelined out.
+    """
+
+    def __init__(
+        self,
+        model: DistributedLlama,
+        batch_size: int = 1,
+        dtype=torch.bfloat16,
+        max_cache_len=2048,
+    ):
+        count = 0
+        self.layer_map = [0] * len(model.model.model.layers)
+        for i, layer in enumerate(model.model.model.layers):
+            if isinstance(layer, LlamaDecoderLayer):
+                self.layer_map[i] = count
+                count += 1
+
+        config = deepcopy(model.model.config)
+        config.num_layers = count
+        config.max_position_embeddings = max_cache_len
+
+        super().__init__(
+            config, batch_size=batch_size, dtype=dtype, device=model.model.device
+        )
+
+    def remap_layer(self, layer_idx: int):
+        return self.layer_map[layer_idx]
+
+    def get_seq_length(self, layer_idx: int = 0):
+        layer_idx = self.remap_layer(layer_idx)
+        return super().get_seq_length(layer_idx)
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: dict = None,
+    ):
+        layer_idx = self.remap_layer(layer_idx)
+        return super().update(key_states, value_states, layer_idx, cache_kwargs)
+
+
 class KVCacheManager:
     """
     Manages the key-value cache for the model, keeping track of the previous tokens.
+    Dynamically switches between static and dynamic caches based on the input length.
     """
 
-    def __init__(self):
-        self.cached_tokens = None
-        self.kv_cache = CustomDynamicCache()
+    def __init__(self, model: DistributedLlama):
+        self.model = model
+        self.compiled = hasattr(self.model.model, "compiled_forward")
 
-    def get_cache(self, inputs, input_len):
+        if self.compiled:
+            self.static_cache = PipelineStaticCache(self.model)
+
+        self.cached_tokens = None
+        self.kv_cache = self.static_cache if self.compiled else PipelineDynamicCache()
+
+    def get_cache(self, inputs, input_len, max_new_tokens):
+        # Check if the cache can be reused
         if self.cached_tokens is not None:
-            # Check if the cache can be reused
             cached_len = self.cached_tokens.shape[1]
-            if cached_len < input_len and torch.equal(
-                self.cached_tokens, inputs[:, :cached_len]
+            if not (
+                cached_len < input_len
+                and torch.equal(self.cached_tokens, inputs[:, :cached_len])
             ):
-                return self.kv_cache
+                print("Cache miss")
+                self.cached_tokens = None
+                if self.compiled:
+                    self.clear()
+                else:
+                    self.kv_cache = PipelineDynamicCache()
             else:
-                self.clear()
+                print("Cache hit")
+
+        # Switch to dynamic cache if the static cache is too small
+        if isinstance(
+            self.kv_cache, PipelineStaticCache
+        ) and self.kv_cache.max_cache_len < (input_len + max_new_tokens):
+            print("Switching to dynamic cache")
+            self.cached_tokens = None
+            self.kv_cache.reset()
+            self.kv_cache = PipelineDynamicCache()
+
+        # Switch to compiled forward if available
+        if self.compiled:
+            if isinstance(self.kv_cache, PipelineStaticCache):
+                self.model.model.forward = self.model.model.compiled_forward
+            else:
+                self.model.model.forward = self.model.model.original_forward
 
         return self.kv_cache
 
@@ -132,10 +209,8 @@ class KVCacheManager:
         self.cached_tokens = outputs
 
     def clear(self):
-        del self.cached_tokens
-        del self.kv_cache
         self.cached_tokens = None
-        self.kv_cache = CustomDynamicCache()
+        self.kv_cache = PipelineStaticCache(self.model)
 
 
 def barrier(device):
@@ -189,6 +264,7 @@ def chat_loop(
         streamer=None,
         max_new_tokens=1,
         pad_token_id=tokenizer.eos_token_id,
+        past_key_values=PipelineStaticCache(model),
     )
 
     if dist.get_rank() == 0:
@@ -230,6 +306,7 @@ def chat_loop(
                 streamer=output_streamer,
                 max_new_tokens=10 if args.benchmark else args.max_tokens_per_response,
                 pad_token_id=tokenizer.eos_token_id,
+                past_key_values=PipelineStaticCache(model),
             )
 
             # Debug print performance
