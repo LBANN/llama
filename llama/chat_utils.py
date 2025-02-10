@@ -132,6 +132,7 @@ class PipelineStaticCache(StaticCache):
         config = deepcopy(model.model.config)
         config.num_layers = count
         config.max_position_embeddings = max_cache_len
+        self.max_batch_size = max_batch_size
 
         super().__init__(
             config,
@@ -197,7 +198,7 @@ class KVCacheManager:
             and self.cached_tokens.shape[0] != inputs.shape[0]
         ):
             print("Cache miss (batch size)")
-            self.clear(full_reset=True, batch_size=inputs.shape[0])
+            self.clear(batch_size=inputs.shape[0])
         else:
             # Check if the cache can be reused
             if self.cached_tokens is not None:
@@ -207,7 +208,7 @@ class KVCacheManager:
                     and torch.equal(self.cached_tokens, inputs[:, :cached_len])
                 ):
                     print("Cache miss")
-                    self.clear()
+                    self.clear(batch_size=inputs.shape[0])
                 else:
                     print("Cache hit")
 
@@ -232,11 +233,15 @@ class KVCacheManager:
     def update(self, outputs):
         self.cached_tokens = outputs
 
-    def clear(self, full_reset: bool = False, batch_size: int = 1):
+    def clear(self, batch_size: int = 1):
         self.cached_tokens = None
 
         if self.use_static_cache:
-            if full_reset:
+            # Perform a full reset of the static cache if the batch size changed
+            if (
+                self.static_cache is not None
+                and batch_size != self.static_cache.max_batch_size
+            ):
                 self.static_cache = PipelineStaticCache(
                     self.model,
                     max_batch_size=batch_size,
