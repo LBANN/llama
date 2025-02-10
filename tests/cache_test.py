@@ -12,12 +12,19 @@ class MockLlama:
 
 @pytest.mark.parametrize("static_cache", [True, False])
 def test_varying_batch_size(static_cache):
-    config = LlamaConfig(hidden_size=1024, num_hidden_layers=4, num_attention_heads=8, intermediate_size=2048)
+    config = LlamaConfig(
+        hidden_size=1024,
+        num_hidden_layers=4,
+        num_attention_heads=8,
+        intermediate_size=2048,
+    )
     model = LlamaForCausalLM(config)
     batch_sizes = [1, 8, 8, 5]
     input_len = 16
     max_tokens = 16
-    inputs = [torch.randint(0, 100, (batch_size, input_len)) for batch_size in batch_sizes]
+    inputs = [
+        torch.randint(0, 100, (batch_size, input_len)) for batch_size in batch_sizes
+    ]
     attn_masks = [torch.ones((batch_size, input_len)) for batch_size in batch_sizes]
 
     lllama = MockLlama(model)

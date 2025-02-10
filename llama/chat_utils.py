@@ -97,7 +97,13 @@ class PipelineDynamicCache(DynamicCache):
         if layer_idx is None:
             if len(self.key_cache) == 0:
                 return 0
-            max_seq_length = max([layer_cache.shape[-2] for layer_cache in self.key_cache if len(layer_cache) > 0])
+            max_seq_length = max(
+                [
+                    layer_cache.shape[-2]
+                    for layer_cache in self.key_cache
+                    if len(layer_cache) > 0
+                ]
+            )
             return max_seq_length
 
         return super().get_seq_length(layer_idx)
@@ -112,7 +118,7 @@ class PipelineStaticCache(StaticCache):
     def __init__(
         self,
         model: DistributedLlama,
-        batch_size: int = 1,
+        max_batch_size: int = 1,
         dtype=torch.bfloat16,
         max_cache_len=2048,
     ):
@@ -129,7 +135,7 @@ class PipelineStaticCache(StaticCache):
 
         super().__init__(
             config,
-            batch_size=batch_size,
+            max_batch_size=max_batch_size,
             dtype=dtype,
             device=model.model.device,
         )
@@ -159,7 +165,9 @@ class PipelineStaticCache(StaticCache):
         for i, layer in enumerate(model.model.model.layers):
             if isinstance(layer, LlamaDecoderLayer):
                 cache.key_cache[i] = self.key_cache[self.remap_layer(i)][:, :, :seq_len]
-                cache.value_cache[i] = self.value_cache[self.remap_layer(i)][:, :, :seq_len]
+                cache.value_cache[i] = self.value_cache[self.remap_layer(i)][
+                    :, :, :seq_len
+                ]
 
         return cache
 
@@ -176,29 +184,37 @@ class KVCacheManager:
 
         if self.use_static_cache:
             self.static_cache = PipelineStaticCache(
-                self.model, max_cache_len=model.static_cache_size, dtype=model.model.dtype
+                self.model,
+                max_cache_len=model.static_cache_size,
+                dtype=model.model.dtype,
             )
 
         self.clear()
 
     def get_cache(self, inputs, input_len, max_new_tokens):
-        if self.cached_tokens is not None and self.cached_tokens.shape[0] != inputs.shape[0]:
+        if (
+            self.cached_tokens is not None
+            and self.cached_tokens.shape[0] != inputs.shape[0]
+        ):
             print("Cache miss (batch size)")
             self.clear(full_reset=True, batch_size=inputs.shape[0])
         else:
             # Check if the cache can be reused
             if self.cached_tokens is not None:
                 cached_len = self.cached_tokens.shape[1]
-                if not (cached_len < input_len and torch.equal(self.cached_tokens, inputs[:, :cached_len])):
+                if not (
+                    cached_len < input_len
+                    and torch.equal(self.cached_tokens, inputs[:, :cached_len])
+                ):
                     print("Cache miss")
                     self.clear()
                 else:
                     print("Cache hit")
 
         # Switch to dynamic cache if the static cache is too small
-        if isinstance(self.kv_cache, PipelineStaticCache) and self.kv_cache.max_cache_len < (
-            input_len + max_new_tokens
-        ):
+        if isinstance(
+            self.kv_cache, PipelineStaticCache
+        ) and self.kv_cache.max_cache_len < (input_len + max_new_tokens):
             print("Switching to dynamic cache")
             self.kv_cache = self.kv_cache.to_dynamic_cache(self.model)
 
@@ -223,7 +239,7 @@ class KVCacheManager:
             if full_reset:
                 self.static_cache = PipelineStaticCache(
                     self.model,
-                    batch_size=batch_size,
+                    max_batch_size=batch_size,
                     max_cache_len=self.model.static_cache_size,
                     dtype=self.model.model.dtype,
                 )
@@ -337,16 +353,22 @@ def chat_loop(
                 output_streamer.time_per_token = []
                 gpu_memory = torch.cuda.memory_allocated() / 1024**3
                 total_gpu_memory = gpu_memory * dist.get_world_size()
-                print(f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]")
+                print(
+                    f"Memory used: {gpu_memory:.2f} GiB per GPU [Total memory ~= {total_gpu_memory:.2f} GiB]"
+                )
             # Benchmark only runs one iteration
             if args.benchmark:
                 break
 
             # Keep track of the conversation
-            messages.append({"role": "assistant", "content": output_streamer.last_message})
+            messages.append(
+                {"role": "assistant", "content": output_streamer.last_message}
+            )
             output_streamer.clear_last_message()
     except (EOFError, KeyboardInterrupt):
         # Broadcast zeros to finalize the rest of the ranks
         if dist.get_rank() == 0:
             print("[Ending chat]")
-            chat_synchronize_ranks(inputs, device, ControlInfo(message=ControlMessageType.EXIT))
+            chat_synchronize_ranks(
+                inputs, device, ControlInfo(message=ControlMessageType.EXIT)
+            )

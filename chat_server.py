@@ -165,14 +165,22 @@ async def completions(request: Request):
             # but we want to store just the content
             outputs.append(res.split(strip_str)[1][:-7])
 
-        msg = {"choices": [{"message": {
-                            "role": "assistant",
-                            "content": "".join(outputs),
-                            },
-                            "finish_reason": "stop"}],
-                "usage": {"completion_tokens": len(outputs),
-                          "prompt_tokens": input_len,
-                          "total_tokens": (input_len + len(outputs))}}
+        msg = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "".join(outputs),
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "completion_tokens": len(outputs),
+                "prompt_tokens": input_len,
+                "total_tokens": (input_len + len(outputs)),
+            },
+        }
         # Return the collected outputs as a single response
         return msg
 
@@ -221,6 +229,7 @@ def master_loop(inputs, device, gen_queue, interval_minutes=5):
                     inputs, device, ControlInfo(message=ControlMessageType.EXIT)
                 )
                 return
+
             input_len, max_tokens, settings, streamer = task
 
             # Synchronize the input tokens and lengths
