@@ -60,6 +60,18 @@ def get_args(server: bool = False):
         type=int,
         default=0,
     )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=1,
+        help="Maximum number of requests to batch together (1 for no batching)",
+    )
+    parser.add_argument(
+        "--batch-delay",
+        type=int,
+        default=100,
+        help="Milliseconds to wait for more requests before processing a batch",
+    )
     if server:
         parser.add_argument("--port", type=int, default=8123)
     return parser.parse_args()
@@ -78,6 +90,7 @@ class ControlInfo:
     input_len: int = 0
     max_new_tokens: int = 0
     temperature: float = None
+    batch_size: int = 1
 
     def to_kwargs(self):
         result = {}
@@ -263,14 +276,13 @@ def barrier(device):
     dist.all_reduce(torch.tensor(0, device=device), op=dist.ReduceOp.SUM)
 
 
-def chat_synchronize_ranks(inputs, device, info=None):
+def chat_synchronize_ranks(device, info=None):
     """
     Waits for all ranks to receive the input length of the next message.
     """
     barrier(device)
     info_list = [info]
     dist.broadcast_object_list(info_list, 0)
-    dist.broadcast(inputs, 0)
 
     return info_list[0]
 
@@ -334,12 +346,15 @@ def chat_loop(
                     return_tensors="pt",
                 ).to(device)
                 inputs[0, : actual_inputs.shape[-1]] = actual_inputs
-                info = ControlInfo(input_len=actual_inputs.shape[-1])
+                info = ControlInfo(
+                    input_len=actual_inputs.shape[-1], batch_size=actual_inputs.shape[0]
+                )
 
             # Synchronize the input tokens and lengths
-            info = chat_synchronize_ranks(inputs, device, info)
+            info = chat_synchronize_ranks(device, info)
             if info.message == ControlMessageType.EXIT:
                 break
+            dist.broadcast(inputs, 0)
 
             # The crux of the chat loop: generate the response
             model.generate(
@@ -374,6 +389,4 @@ def chat_loop(
         # Broadcast zeros to finalize the rest of the ranks
         if dist.get_rank() == 0:
             print("[Ending chat]")
-            chat_synchronize_ranks(
-                inputs, device, ControlInfo(message=ControlMessageType.EXIT)
-            )
+            chat_synchronize_ranks(device, ControlInfo(message=ControlMessageType.EXIT))
