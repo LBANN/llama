@@ -21,7 +21,10 @@ import json
 import queue
 import threading
 import time
+import os
 from dataclasses import dataclass
+import sys
+import atexit
 
 import torch
 import torch.distributed as dist
@@ -59,6 +62,7 @@ class ChatRequest:
     """
     Object that stores a chat request.
     """
+
     inputs: list[int]
     max_tokens: int
     settings: dict[str, float]
@@ -155,22 +159,25 @@ async def completions(request: Request):
     # Return a streaming response
     if stream:
         streaming_request_queue.put(chat_request)
-        await asyncio.sleep(0.1)  # Yield execution to allow batch size to accumulate
 
         async def content_stream(request: Request):
             try:
                 while True:
+                    await asyncio.sleep(0.001)  # Yield execution
+
                     # Check if the client has disconnected
                     if await request.is_disconnected():
                         print("Client has disconnected")
                         message_queue.put(None)
                         streamer_queue.get()  # Get final signal
                         break
-
-                    res = streamer_queue.get()
-                    if res is None:
-                        break
-                    yield res
+                    try:
+                        res = streamer_queue.get(block=False)
+                        if res is None:
+                            break
+                        yield res
+                    except queue.Empty:
+                        pass
 
             except asyncio.CancelledError:
                 print("Chat stream was interrupted")
@@ -183,22 +190,25 @@ async def completions(request: Request):
         )
     else:
         nonstreaming_request_queue.put(chat_request)
-        await asyncio.sleep(0.1)  # Yield execution to allow batch size to accumulate
 
         strip_str = 'data: {"choices": [{"delta": {"role": "assistant", "content": "'
         outputs = []
         # Collect all outputs
         output_tokens = 0
         while True:
-            res = streamer_queue.get()
-            if res is None:
-                break
-            # res is a string that looks like a json object e.g.
-            # res = 'data: {"choices": [{"delta": {"role": "assistant", "content": "?"}}]}'
-            # but we want to store just the content
-            outputs.append(res.split(strip_str)[1][:-7])
-            output_tokens += 1
+            await asyncio.sleep(0.001)  # Yield execution
 
+            try:
+                res = streamer_queue.get(block=False)
+                if res is None:
+                    break
+                # res is a string that looks like a json object e.g.
+                # res = 'data: {"choices": [{"delta": {"role": "assistant", "content": "?"}}]}'
+                # but we want to store just the content
+                outputs.append(res.split(strip_str)[1][:-7])
+                output_tokens += 1
+            except queue.Empty:
+                continue
         msg = {
             "choices": [
                 {
@@ -447,8 +457,8 @@ def worker_loop():
         info = chat_synchronize_ranks(device)
 
 
-def main():
-    args = get_args(server=True)
+def main(running_under_server=False):
+    args = get_args(server=not running_under_server)
 
     if not dist.is_initialized():
         dist.init_process_group("nccl")
@@ -467,7 +477,7 @@ def main():
 
     global model
     global tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, padding_side="left")
     model = DistributedLlama(
         args.model_dir,
         device,
@@ -494,8 +504,8 @@ def main():
             )
             model.static_cache_size = args.static_cache_size
 
-    # Run the uvicorn server
-    if dist.get_rank() == 0:
+    # Initialize the model serving thread loop
+    if running_under_server or dist.get_rank() == 0:
         # Create request queues for users
         global streaming_request_queue
         global nonstreaming_request_queue
@@ -516,24 +526,41 @@ def main():
         )
         gen_thread.start()
 
-        # Detect the hostname and print it
-        import socket
+        # Run the uvicorn server if necessary
+        if not running_under_server:
+            # Detect the hostname and print it
+            import socket
 
-        print("Running server on", socket.gethostname())
+            print("Running server on", socket.gethostname())
 
-        uvicorn.run(app, host=socket.gethostname(), port=args.port)
+            uvicorn.run(app, host=socket.gethostname(), port=args.port)
 
-        print("Loop is over")
+            print("Loop is over")
 
-        # Send shutdown signal to main thread
-        streaming_request_queue.put(None)
+            # Send shutdown signal to main thread
+            streaming_request_queue.put(None)
+            dist.destroy_process_group()
+        else:
+            atexit.register(dist.destroy_process_group)
     else:
         # Other ranks participate in the chat server by waiting
         worker_loop()
-
-    dist.destroy_process_group()
+        dist.destroy_process_group()
 
 
 # Run the app
 if __name__ == "__main__":
     main()
+elif os.getenv("SERVER_SOFTWARE", "").startswith("gunicorn"):
+    # Gunicorn server
+    if sys.argv.index("--") > 0:
+        sys.argv = sys.argv[sys.argv.index("--") + 1 :]
+    sys.argv.insert(0, __name__)
+
+    # Initialize the server thread
+    main(running_under_server=True)
+
+elif sys.argv[0].endswith("uvicorn") or Process().parent().name() == "uvicorn":
+    raise RuntimeError(
+        "Running under uvicorn is not supported, please run the script directly or use gunicorn."
+    )
