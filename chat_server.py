@@ -308,11 +308,9 @@ def master_loop(
     interval_minutes=5,
 ):
     cache_manager = KVCacheManager(model)
+    last_sync_time = time.time()
     while True:
         try:
-            if batch_delay > 0 and max_batch_size > 1:
-                time.sleep(batch_delay / 1000)
-
             # Aggregate tasks from the request queues
             if not streaming_request_queue.empty():
                 task = aggregate_tasks(
@@ -323,6 +321,16 @@ def master_loop(
                     nonstreaming_request_queue, max_batch_size, interval_minutes
                 )
             else:
+                # No tasks
+                if time.time() - last_sync_time > interval_minutes * 60:
+                    # Send a keepalive signal if too much time has passed
+                    chat_synchronize_ranks(
+                        device, ControlInfo(message=ControlMessageType.KEEPALIVE)
+                    )
+                    last_sync_time = time.time()
+
+                # Otherwise, wait
+                time.sleep(batch_delay / 1000)
                 continue
 
             # Check for shutdown signal
@@ -350,6 +358,7 @@ def master_loop(
                 temperature=settings.get("temperature", None),
             )
             chat_synchronize_ranks(device, control_info)
+            last_sync_time = time.time()
             kwargs = control_info.to_kwargs()
             dist.broadcast(inputs, 0)
 
@@ -389,6 +398,7 @@ def master_loop(
             chat_synchronize_ranks(
                 device, ControlInfo(message=ControlMessageType.KEEPALIVE)
             )
+            last_sync_time = time.time()
         except StopIteration:  # Chat interrupted
             # Clear KV cache on interruption
             cache_manager.clear()
