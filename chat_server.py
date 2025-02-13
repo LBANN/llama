@@ -505,7 +505,7 @@ def main(running_under_server=False):
             model.static_cache_size = args.static_cache_size
 
     # Initialize the model serving thread loop
-    if running_under_server or dist.get_rank() == 0:
+    if dist.get_rank() == 0:
         # Create request queues for users
         global streaming_request_queue
         global nonstreaming_request_queue
