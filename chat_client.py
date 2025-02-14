@@ -18,8 +18,9 @@ A simple streaming chat client based on the openai library.
 import argparse
 import atexit
 import os
-import openai
 import readline
+
+import openai
 
 
 def chat_loop(model: str, url: str, args):

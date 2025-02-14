@@ -17,14 +17,14 @@ from psutil import Process
 affinity = Process().cpu_affinity()
 
 import asyncio
+import atexit
 import json
+import os
 import queue
+import sys
 import threading
 import time
-import os
 from dataclasses import dataclass
-import sys
-import atexit
 
 import torch
 import torch.distributed as dist
