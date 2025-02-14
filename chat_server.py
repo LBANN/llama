@@ -80,14 +80,12 @@ class ChatServerTextStreamer(TextStreamer):
         tokenizer,
         queues: list[queue.Queue],
         message_queues: list[queue.Queue],
-        streaming: list[bool],
         skip_prompt: bool = True,
         **decode_kwargs,
     ):
         super().__init__(tokenizer, skip_prompt, **decode_kwargs)
         self.queues = queues
         self.message_queues = message_queues
-        self.streaming = streaming
         self._prev_token = None
 
     def put(self, value: torch.Tensor):
@@ -120,12 +118,11 @@ class ChatServerTextStreamer(TextStreamer):
 
         v = self.tokenizer.batch_decode(value, skip_special_tokens=True)
 
-        for i, (q, s) in enumerate(zip(self.queues, self.streaming)):
-            if s:
-                response = {
-                    "choices": [{"delta": {"role": "assistant", "content": str(v[i])}}]
-                }
-                q.put(f"data: {json.dumps(response)}\n\n")
+        for i, q in enumerate(self.queues):
+            response = {
+                "choices": [{"delta": {"role": "assistant", "content": str(v[i])}}]
+            }
+            q.put(f"data: {json.dumps(response)}\n\n")
 
     def on_finalized_text(self, _: str, stream_end: bool = False):
         if stream_end:
@@ -194,20 +191,30 @@ async def completions(request: Request):
     else:
         request_queue.put(chat_request)
 
-        # Wait for full output
+        strip_str = 'data: {"choices": [{"delta": {"role": "assistant", "content": "'
+        outputs = []
+        # Collect all outputs
+        output_tokens = 0
         while True:
             await asyncio.sleep(0.001)  # Yield execution
 
-            if not response_queue.empty():
-                output, output_tokens = response_queue.get()
-                break
-
+            try:
+                res = response_queue.get(block=False)
+                if res is None:
+                    break
+                # res is a string that looks like a json object e.g.
+                # res = 'data: {"choices": [{"delta": {"role": "assistant", "content": "?"}}]}'
+                # but we want to store just the content
+                outputs.append(res.split(strip_str)[1][:-7])
+                output_tokens += 1
+            except queue.Empty:
+                continue
         msg = {
             "choices": [
                 {
                     "message": {
                         "role": "assistant",
-                        "content": output,
+                        "content": "".join(outputs),
                     },
                     "finish_reason": "stop",
                 }
@@ -265,7 +272,7 @@ def aggregate_tasks(
     # Process up to `max_batch_size` requests
     print("Queue size:", request_queue.qsize())
     while request_queue.qsize() > 0:
-        requests.append(request_queue.get())
+        requests.append(request_queue.get(timeout=interval_minutes * 60))
 
         # Check for shutdown signal
         if requests[-1] is None:
@@ -369,7 +376,7 @@ def master_loop(
             dist.broadcast(attention_mask, 0)
 
             streamer = ChatServerTextStreamer(
-                tokenizer, response_queues, message_queues, streaming
+                tokenizer, response_queues, message_queues
             )
 
             if inputs.shape[0] > 1:
@@ -390,14 +397,14 @@ def master_loop(
             cache_manager.update(outputs)
 
             # Send signal to end the stream
-            for i, (q, s) in enumerate(zip(response_queues, streaming)):
-                if s:
-                    q.put(None)
-                else:
-                    response = tokenizer.decode(
-                        outputs[i, input_len:], skip_special_tokens=True
-                    ).removeprefix("assistant\n\n")
-                    q.put((response, outputs.shape[1]))
+            for q in response_queues:
+                q.put(None)
+        except queue.Empty:
+            # Send a keepalive signal
+            chat_synchronize_ranks(
+                device, ControlInfo(message=ControlMessageType.KEEPALIVE)
+            )
+            last_sync_time = time.time()
         except StopIteration:  # Chat interrupted
             # Clear KV cache on interruption
             cache_manager.clear()
