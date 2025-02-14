@@ -118,6 +118,7 @@ def chat_loop(model: str, url: str, args):
                 response = chat_completion.choices[0].message.content
                 response = response.replace("\\n", "\n")
                 print(response)
+                conversation.append({"role": "assistant", "content": response})
             else:
                 full_response = ""
                 try:
