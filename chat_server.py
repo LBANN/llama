@@ -118,7 +118,10 @@ class ChatServerTextStreamer(TextStreamer):
         v = self.tokenizer.batch_decode(value, skip_special_tokens=True)
 
         for i, q in enumerate(self.queues):
-            q.put(str(v[i]))
+            if value[i].item() == self.tokenizer.eos_token_id:
+                q.put(None)
+            else:
+                q.put(str(v[i]))
 
     def on_finalized_text(self, _: str, stream_end: bool = False):
         if stream_end:
