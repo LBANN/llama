@@ -32,17 +32,16 @@ def chat_loop(model: str, url: str, args):
         "Press ctrl-D or type '/exit' to end the conversation.",
         "Type '/clear' to clear the chat context.",
         "Type '/help' to see the list of available commands.",
-        "Commands are stored in history file <pwd>/lbann_llama.hist",
+        f"Commands are stored in history file {args.history}.",
     )
 
-    histfile = "lbann_llama.hist"
     try:
-        readline.read_history_file(histfile)
+        readline.read_history_file(args.history)
         readline.set_history_length(1000)
     except FileNotFoundError:
         pass
 
-    atexit.register(readline.write_history_file, histfile)
+    atexit.register(readline.write_history_file, args.history)
 
     try:
         while True:
@@ -110,24 +109,29 @@ def chat_loop(model: str, url: str, args):
             chat_completion = client.chat.completions.create(
                 model=model,
                 messages=conversation,
-                stream=True,
+                stream=not args.no_stream,
                 temperature=temperature,
                 max_tokens=args.max_tokens,
             )
-            full_response = ""
-            try:
-                for chunk in chat_completion:
-                    if chunk.choices[0].delta.content is not None:
-                        full_response += chunk.choices[0].delta.content
-                        print(chunk.choices[0].delta.content, end="", flush=True)
-                print()
-            except KeyboardInterrupt:  # Catch ctrl-C
-                chat_completion.close()
-                print("\n[Response interrupted]")
+            if args.no_stream:
+                response = chat_completion.choices[0].message.content
+                response = response.replace("\\n", "\n")
+                print(response)
+            else:
+                full_response = ""
+                try:
+                    for chunk in chat_completion:
+                        if chunk.choices[0].delta.content is not None:
+                            full_response += chunk.choices[0].delta.content
+                            print(chunk.choices[0].delta.content, end="", flush=True)
+                    print()
+                except KeyboardInterrupt:  # Catch ctrl-C
+                    chat_completion.close()
+                    print("\n[Response interrupted]")
 
-            full_response += "\n"
-            response_message = {"role": "assistant", "content": full_response}
-            conversation.append(response_message)
+                full_response += "\n"
+                response_message = {"role": "assistant", "content": full_response}
+                conversation.append(response_message)
     except EOFError:
         print("[Ending chat]")
 
@@ -138,6 +142,10 @@ def main():
     parser.add_argument("--url", type=str, default="http://localhost:8123")
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--custom-prompt", type=str, default=None)
+    parser.add_argument(
+        "--history", action="store", type=str, default=".chat-client-history"
+    )
+    parser.add_argument("--no-stream", action="store_true")
 
     args = parser.parse_args()
     chat_loop(args.model, args.url, args)

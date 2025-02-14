@@ -167,3 +167,6 @@ cython_debug/
 # Use wildcards as well
 *~
 *.o
+
+# Chat client history
+.chat-client-history
