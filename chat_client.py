@@ -107,33 +107,35 @@ def chat_loop(model: str, url: str, args):
 
             conversation.append({"role": "user", "content": message})
 
-            chat_completion = client.chat.completions.create(
-                model=model,
-                messages=conversation,
-                stream=not args.no_stream,
-                temperature=temperature,
-                max_tokens=args.max_tokens,
-            )
-            if args.no_stream:
-                response = chat_completion.choices[0].message.content
-                response = response.replace("\\n", "\n")
-                print(response)
-                conversation.append({"role": "assistant", "content": response})
-            else:
-                full_response = ""
-                try:
+            try:
+                chat_completion = client.chat.completions.create(
+                    model=model,
+                    messages=conversation,
+                    stream=not args.no_stream,
+                    temperature=temperature,
+                    max_tokens=args.max_tokens,
+                )
+
+                if args.no_stream:
+                    response = chat_completion.choices[0].message.content
+                    response = response.replace("\\n", "\n")
+                    print(response)
+                    conversation.append({"role": "assistant", "content": response})
+                else:
+                    full_response = ""
                     for chunk in chat_completion:
                         if chunk.choices[0].delta.content is not None:
                             full_response += chunk.choices[0].delta.content
                             print(chunk.choices[0].delta.content, end="", flush=True)
                     print()
-                except KeyboardInterrupt:  # Catch ctrl-C
-                    chat_completion.close()
-                    print("\n[Response interrupted]")
 
-                full_response += "\n"
-                response_message = {"role": "assistant", "content": full_response}
-                conversation.append(response_message)
+                    full_response += "\n"
+                    response_message = {"role": "assistant", "content": full_response}
+                    conversation.append(response_message)
+            except KeyboardInterrupt:  # Catch ctrl-C
+                if not args.no_stream:
+                    chat_completion.close()
+                print("\n[Response interrupted]")
     except EOFError:
         print("[Ending chat]")
 
