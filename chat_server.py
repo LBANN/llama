@@ -16,6 +16,7 @@ from psutil import Process
 # Save affinity
 affinity = Process().cpu_affinity()
 
+import base64
 import asyncio
 import atexit
 import json
@@ -23,8 +24,11 @@ import os
 import queue
 import sys
 import threading
+from io import BytesIO
 import time
 from dataclasses import dataclass
+from PIL import Image
+from urllib.parse import urlparse
 
 import torch
 import torch.distributed as dist
@@ -42,6 +46,8 @@ from llama.chat_utils import (
     chat_synchronize_ranks,
     get_args,
 )
+from transformers import MllamaForConditionalGeneration, AutoProcessor, \
+    Llama4ForConditionalGeneration, TextIteratorStreamer
 
 # Restore affinity
 Process().cpu_affinity(affinity)
@@ -51,9 +57,17 @@ app = FastAPI()
 
 # Global variables
 model = tokenizer = None
+processor = None
 device = torch.device("cuda:0")
 max_batch_size = None
 request_queue: queue.Queue = None
+
+# TODO: Need to get these accesible...
+default_settings = {
+    "max_new_tokens": 1024,
+    "temperature": 0.6,
+    "top_p": 0.9,
+}
 
 
 @dataclass
@@ -128,6 +142,36 @@ class ChatServerTextStreamer(TextStreamer):
             self._prev_token = None
 
 
+def load_image_from_url(url):
+    try:
+        url_spec = urlparse(url)
+
+        if url_spec.scheme.startswith("http"):
+            msg = "Only base64 data URLs are supported for now."
+            raise NotImplementedError(msg)
+
+        if url_spec.scheme == "data":
+            data_spec, data = url_spec.path.split(",", 1)
+            media_type, data_type = data_spec.split(";", 1)
+
+            if data_type != "base64":
+                msg = "Only base64 data URLs are supported for now."
+                raise NotImplementedError(msg)
+            image = Image.open(BytesIO(base64.b64decode(data)))
+            image.load()
+            return image.convert("RGB")
+            # return media_io.load_base64(media_type, data)
+
+        if url_spec.scheme == "file":
+            msg = "Only base64 data URLs are supported for now."
+            raise NotImplementedError(msg)
+
+        msg = "The URL must be either a HTTP, data or file URL."
+        raise ValueError(msg)
+    except Exception as e:
+        print('could not load image:', e)
+
+
 # Define a route for OpenAI API compatibility
 @app.post("/chat/completions")
 async def completions(request: Request):
@@ -139,14 +183,49 @@ async def completions(request: Request):
     max_tokens = request_body.get("max_tokens", 512)
     stream = request_body.get("stream", False)
     settings = {}
+    # print(type(messages), messages)
     if "temperature" in request_body:
         settings["temperature"] = request_body.get("temperature")
 
-    actual_inputs: torch.Tensor = tokenizer.apply_chat_template(
-        messages,
-        return_tensors="pt",
-    )
-    inputs = actual_inputs.flatten().tolist()
+    if tokenizer is not None:
+        actual_inputs: torch.Tensor = tokenizer.apply_chat_template(
+            messages,
+            return_tensors="pt",
+        )
+        inputs = actual_inputs.flatten().tolist()
+    else:
+        images = []
+        # search if there is images
+        for message in messages:
+            if 'content' in message:
+                for cont in message['content']:
+                    try:
+                        if 'image_url' in cont.keys():
+                            image = load_image_from_url(cont['image_url']["url"])
+                            images.append(image)
+                    except Exception as e:
+                        print('could not load image:', e)
+
+        actual_inputs = processor.apply_chat_template(
+            messages, add_generation_prompt=True,
+        )
+        # print('Actual inputs\n', actual_inputs)
+        if len(images) == 0:
+            inputs = processor(
+                text=actual_inputs, return_tensors="pt",
+            ).to(device)
+        else:
+            # TODO: You need to broadcast inputs['pixel_values'] from rank 0 to
+            # all other devices. These pixel values then need to be fed into
+            # the model.generate calls.
+            print('Images not yet supported.')
+            inputs = processor(
+                text=actual_inputs, return_tensors="pt",
+                # images=images,
+            ).to(device)
+        # print('inputs\n', inputs)
+        inputs = inputs['input_ids'].flatten().tolist()
+
     input_len = len(inputs)
 
     response_queue = queue.Queue()
@@ -269,10 +348,18 @@ def aggregate_tasks(request_queue: queue.Queue, max_batch_size: int):
     # Aggregate the inputs and settings
     qlen = len(requests)
     input_len = max([len(x.inputs) for x in requests])
-    actual_inputs = torch.full(
-        (qlen, input_len), tokenizer.eos_token_id, device=device, dtype=torch.long
-    )
+    if tokenizer is not None:
+        actual_inputs = torch.full(
+            (qlen, input_len), tokenizer.eos_token_id, device=device,
+            dtype=torch.long,
+        )
+    else:
+        actual_inputs = torch.full(
+            (qlen, input_len), processor.tokenizer.eos_token_id, device=device,
+            dtype=torch.long,
+        )
     for i, request in enumerate(requests):
+        # print(i, request)
         actual_inputs[i, -len(request.inputs) :] = torch.tensor(request.inputs)
 
     max_tokens = max([x.max_tokens for x in requests])
@@ -300,8 +387,10 @@ def master_loop(
     request_queue,
     batch_delay,
     interval_minutes=5,
+    model_ver=3,
 ):
-    cache_manager = KVCacheManager(model)
+    if model_ver == 3:
+        cache_manager = KVCacheManager(model)
     last_sync_time = time.time()
     while True:
         try:
@@ -349,34 +438,63 @@ def master_loop(
             last_sync_time = time.time()
             kwargs = control_info.to_kwargs()
             dist.broadcast(inputs, 0)
-
-            # Prepare attention mask based on input lengths
             attention_mask = torch.ones_like(inputs)
             for i, length in enumerate(input_lengths):
                 if length < input_len:
                     attention_mask[i, 0 : input_len - length] = 0
             dist.broadcast(attention_mask, 0)
+            if model_ver == 3:
+                # Prepare attention mask based on input lengths
 
-            streamer = ChatServerTextStreamer(
-                tokenizer, response_queues, message_queues
-            )
+                streamer = ChatServerTextStreamer(
+                    tokenizer, response_queues, message_queues
+                )
 
-            if inputs.shape[0] > 1:
-                print("Batched request. Batch size:", inputs.shape[0])
+                if inputs.shape[0] > 1:
+                    print("Batched request. Batch size:", inputs.shape[0])
 
-            # Generate text as a streaming response
-            outputs = model.generate(
-                input_ids=inputs,
-                attention_mask=attention_mask,
-                streamer=streamer,
-                max_new_tokens=max_tokens,
-                pad_token_id=tokenizer.eos_token_id,
-                past_key_values=cache_manager.get_cache(inputs, input_len, max_tokens),
-                **kwargs,
-            )
+                # Generate text as a streaming response
+                outputs = model.generate(
+                    input_ids=inputs,
+                    attention_mask=attention_mask,
+                    streamer=streamer,
+                    max_new_tokens=max_tokens,
+                    pad_token_id=tokenizer.eos_token_id,
+                    past_key_values=cache_manager.get_cache(inputs, input_len, max_tokens),
+                    **kwargs,
+                )
 
-            # Update the cached tokens
-            cache_manager.update(outputs)
+                # Update the cached tokens
+                cache_manager.update(outputs)
+
+            elif model_ver == 4:
+
+                streamer = TextIteratorStreamer(
+                    processor, skip_prompt=True, skip_special_tokens=True,
+                )
+                streamer_inputs = {
+                    'input_ids': inputs,
+                    'attention_mask': attention_mask,
+                }
+                # TODO: support grabbing settings...
+                # print('streamer inputs', streamer_inputs)
+                # keywords = dict(streamer_inputs, **settings)
+                keywords = dict(streamer_inputs, **default_settings)
+                keywords['streamer'] = streamer
+                # create a thread to pull results from the model on one thread
+                thread = threading.Thread(
+                    target=model.generate, kwargs=keywords,
+                )
+                thread.start()
+                response = ""
+                for new_text in streamer:
+                    # put the new_text into a queue that is going back to a streaming client
+                    response_queues[0].put(new_text)
+                    response += new_text
+                    # print(response)
+
+                thread.join()
+                # print('Done with response')
 
             # Send signal to end the stream
             for q in response_queues:
@@ -396,8 +514,9 @@ def master_loop(
                 q.put(None)
 
 
-def worker_loop():
-    cache_manager = KVCacheManager(model)
+def worker_loop(model_ver=3):
+    if model_ver == 3:
+        cache_manager = KVCacheManager(model)
     info: ControlInfo = chat_synchronize_ranks(device)
     while info.message != ControlMessageType.EXIT:
         if info.message != ControlMessageType.KEEPALIVE:
@@ -412,25 +531,49 @@ def worker_loop():
             dist.broadcast(attention_mask, 0)
 
             try:
-                outputs = model.generate(
-                    input_ids=inputs,
-                    attention_mask=attention_mask,
-                    streamer=EventLoopTextStreamer(tokenizer),
-                    max_new_tokens=info.max_new_tokens,
-                    pad_token_id=tokenizer.eos_token_id,
-                    past_key_values=cache_manager.get_cache(
-                        inputs, info.input_len, info.max_new_tokens
-                    ),
-                    **kwargs,
-                )
-                cache_manager.update(outputs)
+                if model_ver == 3:
+                    outputs = model.generate(
+                        input_ids=inputs,
+                        attention_mask=attention_mask,
+                        streamer=EventLoopTextStreamer(tokenizer),
+                        max_new_tokens=info.max_new_tokens,
+                        pad_token_id=tokenizer.eos_token_id,
+                        past_key_values=cache_manager.get_cache(
+                            inputs, info.input_len, info.max_new_tokens
+                        ),
+                        **kwargs,
+                    )
+                    cache_manager.update(outputs)
+                else:
+                    streamer = TextIteratorStreamer(
+                        processor, skip_prompt=True, skip_special_tokens=True,
+                    )
+                    # CJ TODO: Do i need to grab the settings...
+                    streamer_inputs = {
+                        'input_ids': inputs,
+                        'attention_mask': attention_mask,
+                    }
+                    print('streamer inputs', streamer_inputs)
+                    keywords = dict(streamer_inputs, **default_settings)
+                    keywords['streamer'] = streamer
+                    # create a thread to pull results from the model
+                    thread = threading.Thread(
+                        target=model.generate, kwargs=keywords,
+                    )
+                    thread.start()
+                    response = ""
+                    for new_text in streamer:
+                        response += new_text
+                    thread.join()
+
             except StopIteration as ex:  # Chat interrupted
                 info = ex.value
                 if info is not None and info.message == ControlMessageType.EXIT:
                     break
                 elif info is not None and info.message == ControlMessageType.CANCEL:
                     # Clear KV cache on interruption
-                    cache_manager.clear()
+                    if model_ver == 3:
+                        cache_manager.clear()
 
         info = chat_synchronize_ranks(device)
 
@@ -440,37 +583,76 @@ def main(running_under_server=False):
 
     if not dist.is_initialized():
         dist.init_process_group("nccl")
-    device_mesh = LlamaDeviceMesh(
-        tensor_parallel=dist.get_world_size() // args.pp, pipeline_parallel=args.pp
-    )
-    if args.debug:
-        print(
-            f"Device mesh: rank={dist.get_rank()},",
-            f"TP={device_mesh.tp_rank()}/{device_mesh.tp_size()},",
-            f"PP={device_mesh.pp_rank()}/{device_mesh.pp_size()}",
-        )
-
-    # Choose the number of I/O threads automatically
-    io_threads = args.io_threads if args.io_threads > 0 else device_mesh.tp_size()
-
     global model
     global tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, padding_side="left")
-    model = DistributedLlama(
-        args.model_dir,
-        device,
-        device_mesh,
-        delay_init=True,
-        load_checkpoint=not args.benchmark,
-        io_threads=io_threads,
-    )
-    barrier(device)
-
+    global processor
     global inputs
-    inputs = torch.full((1, 131072), 128002, dtype=torch.long, device=device)
-
     global max_batch_size
-    max_batch_size = args.max_batch_size
+
+    if args.model_ver == 3:
+        device_mesh = LlamaDeviceMesh(
+            tensor_parallel=dist.get_world_size() // args.pp, pipeline_parallel=args.pp
+        )
+        if args.debug:
+            print(
+                f"Device mesh: rank={dist.get_rank()},",
+                f"TP={device_mesh.tp_rank()}/{device_mesh.tp_size()},",
+                f"PP={device_mesh.pp_rank()}/{device_mesh.pp_size()}",
+            )
+
+        # Choose the number of I/O threads automatically
+        io_threads = args.io_threads if args.io_threads > 0 else device_mesh.tp_size()
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model_dir, padding_side="left")
+        model = DistributedLlama(
+            args.model_dir,
+            device,
+            device_mesh,
+            delay_init=True,
+            load_checkpoint=not args.benchmark,
+            io_threads=io_threads,
+        )
+        barrier(device)
+
+        inputs = torch.full((1, 131072), 128002, dtype=torch.long, device=device)
+
+        max_batch_size = args.max_batch_size
+
+    elif args.model_ver == 4:
+        # CJ: TODO
+        if 'Llama-4' in args.model_dir:
+            print('Trying to load llama-4')
+            model = Llama4ForConditionalGeneration.from_pretrained(
+                args.model_dir,
+                tp_plan='auto',
+                torch_dtype='auto',
+                attn_implementation="flex_attention",  # did not work?
+            )
+        else:
+            print('Trying to load llama-3.2')
+            model = MllamaForConditionalGeneration.from_pretrained(
+                args.model_dir,
+                tp_plan='auto',
+                torch_dtype='auto',
+            )
+        print(model.dtype)
+        processor = AutoProcessor.from_pretrained(
+            args.model_dir
+        )
+        barrier(device)
+
+        inputs = torch.full(
+            (1, 200002),  # EOS TOKEN ID
+            10485760,  # max positional embeddings
+            dtype=torch.long, device=device)
+
+        max_batch_size = args.max_batch_size
+    else:
+        raise NotImplementedError(
+            f"Llama model version {args.model_ver} is not supported yet",
+        )
+
+    barrier(device)
 
     if args.compile:
         model.model.forward = torch.compile(model.model.forward)
@@ -497,6 +679,7 @@ def main(running_under_server=False):
                 request_queue,
                 args.batch_delay,
             ),
+            kwargs={'model_ver': args.model_ver},
             daemon=True,
         )
         gen_thread.start()
@@ -519,7 +702,7 @@ def main(running_under_server=False):
             atexit.register(dist.destroy_process_group)
     else:
         # Other ranks participate in the chat server by waiting
-        worker_loop()
+        worker_loop(model_ver=args.model_ver)
         dist.destroy_process_group()
 
 

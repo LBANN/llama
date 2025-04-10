@@ -30,6 +30,12 @@ def get_args(server: bool = False):
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument(
+        "--model-ver",
+        type=int,
+        default=3,
+        help='Either llama 3 or llama 4 models are supported.',
+    )
+    parser.add_argument(
         "--pp",
         type=int,
         default=1,
