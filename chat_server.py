@@ -489,9 +489,7 @@ def master_loop(
                     'input_ids': inputs,
                     'attention_mask': attention_mask,
                 }
-                # TODO: support grabbing settings...
-                # print('streamer inputs', streamer_inputs)
-                # keywords = dict(streamer_inputs, **settings)
+
                 keywords = dict(streamer_inputs, **kwargs)
                 keywords['streamer'] = streamer
                 keywords['max_new_tokens'] = max_tokens
@@ -564,7 +562,6 @@ def worker_loop(model_ver=3):
                     streamer = TextIteratorStreamer(
                         processor, skip_prompt=True, skip_special_tokens=True,
                     )
-                    # CJ TODO: Do i need to grab the settings...
                     streamer_inputs = {
                         'input_ids': inputs,
                         'attention_mask': attention_mask,
