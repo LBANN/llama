@@ -8,14 +8,17 @@ version = "1.0.0"
 description = "LBANN Llama inference library"
 readme = "README.md"
 license = {file = "LICENSE"}
-dependencies = ["torch>=2.5",
-               "uvicorn",
-               "transformers>=4.48.2",
-               "tokenizers",
-               "safetensors",
-               "openai",
-               "accelerate",
-               "fastapi",]
+dependencies = [
+    "torch>=2.5",
+    "uvicorn",
+    "transformers>=4.48.2",
+    "tokenizers",
+    "safetensors",
+    "openai",
+    "accelerate",
+    "fastapi",
+    "compressed-tensors",
+]
 
 [project.urls]
 Repository = "https://github.com/LBANN/llama.git"
