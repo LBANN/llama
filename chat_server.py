@@ -62,12 +62,9 @@ device = torch.device("cuda:0")
 max_batch_size = None
 request_queue: queue.Queue = None
 
-# TODO: Need to get these accesible...
-default_settings = {
-    "max_new_tokens": 1024,
-    "temperature": 0.6,
-    "top_p": 0.9,
-}
+MAX_TOKENS_DEFAULT = 512
+TEMPERATURE_DEFAULT = 1.0
+TOP_P_DEFAULT = 1.0
 
 
 @dataclass
@@ -180,12 +177,26 @@ async def completions(request: Request):
 
     # Handle the request
     messages = request_body.get("messages", [])
-    max_tokens = request_body.get("max_tokens", 512)
+    if "max_tokens" in request_body:
+        max_tokens = request_body.get(
+            "max_tokens", MAX_TOKENS_DEFAULT,
+        )
+    if "max_completion_tokens" in request_body:
+        # openai deprciated max_tokens
+        max_tokens = request_body.get(
+            "max_completion_tokens", MAX_TOKENS_DEFAULT,
+        )
     stream = request_body.get("stream", False)
     settings = {}
     # print(type(messages), messages)
     if "temperature" in request_body:
-        settings["temperature"] = request_body.get("temperature")
+        settings["temperature"] = request_body.get(
+            "temperature", TEMPERATURE_DEFAULT,
+        )
+    if "top_p" in request_body:
+        settings["top_p"] = request_body.get(
+            "top_p", TOP_P_DEFAULT,
+        )
 
     if tokenizer is not None:
         actual_inputs: torch.Tensor = tokenizer.apply_chat_template(
@@ -434,6 +445,7 @@ def master_loop(
                 input_len=inputs.shape[1],
                 max_new_tokens=max_tokens,
                 temperature=settings.get("temperature", None),
+                top_p=settings.get("top_p", None),
             )
             chat_synchronize_ranks(device, control_info)
             last_sync_time = time.time()
@@ -480,8 +492,10 @@ def master_loop(
                 # TODO: support grabbing settings...
                 # print('streamer inputs', streamer_inputs)
                 # keywords = dict(streamer_inputs, **settings)
-                keywords = dict(streamer_inputs, **default_settings)
+                keywords = dict(streamer_inputs, **kwargs)
                 keywords['streamer'] = streamer
+                keywords['max_new_tokens'] = max_tokens
+
                 # keywords['cache_implementation'] = "hybrid"
                 # create a thread to pull results from the model on one thread
                 thread = threading.Thread(
@@ -556,8 +570,9 @@ def worker_loop(model_ver=3):
                         'attention_mask': attention_mask,
                     }
                     # print('streamer inputs', streamer_inputs)
-                    keywords = dict(streamer_inputs, **default_settings)
+                    keywords = dict(streamer_inputs, **kwargs)
                     keywords['streamer'] = streamer
+                    keywords['max_new_tokens'] = info.max_new_tokens
                     # keywords['cache_implementation'] = "hybrid"
                     # create a thread to pull results from the model
                     thread = threading.Thread(
@@ -622,6 +637,11 @@ def main(running_under_server=False):
         max_batch_size = args.max_batch_size
 
     elif args.model_ver == 4:
+        global TEMPERATURE_DEFAULT
+        TEMPERATURE_DEFAULT = 0.6
+        global TOP_P_DEFAULT
+        TOP_P_DEFAULT = 0.9
+
         if 'Llama-4' in args.model_dir:
             print('Trying to load llama-4')
             model = Llama4ForConditionalGeneration.from_pretrained(

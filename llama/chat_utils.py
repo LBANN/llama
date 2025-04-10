@@ -96,13 +96,15 @@ class ControlInfo:
     input_len: int = 0
     max_new_tokens: int = 0
     temperature: float = None
+    top_p: float = None
     batch_size: int = 1
 
     def to_kwargs(self):
         result = {}
         if self.temperature is not None:
             result["temperature"] = self.temperature
-
+        if self.top_p is not None:
+            result["top_p"] = self.top_p
         return result
 
 
