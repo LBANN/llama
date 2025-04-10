@@ -482,6 +482,7 @@ def master_loop(
                 # keywords = dict(streamer_inputs, **settings)
                 keywords = dict(streamer_inputs, **default_settings)
                 keywords['streamer'] = streamer
+                # keywords['cache_implementation'] = "hybrid"
                 # create a thread to pull results from the model on one thread
                 thread = threading.Thread(
                     target=model.generate, kwargs=keywords,
@@ -493,9 +494,8 @@ def master_loop(
                     response_queues[0].put(new_text)
                     response += new_text
                     # print(response)
-
                 thread.join()
-                # print('Done with response')
+                print(f'[rank:{dist.get_rank()}] done with streaming')
 
             # Send signal to end the stream
             for q in response_queues:
@@ -508,7 +508,8 @@ def master_loop(
             last_sync_time = time.time()
         except StopIteration:  # Chat interrupted
             # Clear KV cache on interruption
-            cache_manager.clear()
+            if model_ver == 3:
+                cache_manager.clear()
 
             # Send signal to end the stream
             for q in response_queues:
@@ -557,6 +558,7 @@ def worker_loop(model_ver=3):
                     # print('streamer inputs', streamer_inputs)
                     keywords = dict(streamer_inputs, **default_settings)
                     keywords['streamer'] = streamer
+                    # keywords['cache_implementation'] = "hybrid"
                     # create a thread to pull results from the model
                     thread = threading.Thread(
                         target=model.generate, kwargs=keywords,
@@ -566,7 +568,7 @@ def worker_loop(model_ver=3):
                     for new_text in streamer:
                         response += new_text
                     thread.join()
-
+                    print(f'[rank:{dist.get_rank()}] done with streaming')
             except StopIteration as ex:  # Chat interrupted
                 info = ex.value
                 if info is not None and info.message == ControlMessageType.EXIT:
@@ -620,14 +622,14 @@ def main(running_under_server=False):
         max_batch_size = args.max_batch_size
 
     elif args.model_ver == 4:
-        # CJ: TODO
         if 'Llama-4' in args.model_dir:
             print('Trying to load llama-4')
             model = Llama4ForConditionalGeneration.from_pretrained(
                 args.model_dir,
                 tp_plan='auto',
                 torch_dtype='auto',
-                attn_implementation="flex_attention",  # did not work?
+                # attn_implementation="flex_attention",  # crashes after a cache miss
+                attn_implementation="eager",
             )
         else:
             print('Trying to load llama-3.2')
