@@ -200,9 +200,10 @@ async def completions(request: Request):
             if 'content' in message:
                 for cont in message['content']:
                     try:
-                        if 'image_url' in cont.keys():
-                            image = load_image_from_url(cont['image_url']["url"])
-                            images.append(image)
+                        if isinstance(cont, dict):
+                            if 'image_url' in cont.keys():
+                                image = load_image_from_url(cont['image_url']["url"])
+                                images.append(image)
                     except Exception as e:
                         print('could not load image:', e)
 
