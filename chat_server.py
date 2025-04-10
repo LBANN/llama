@@ -553,7 +553,7 @@ def worker_loop(model_ver=3):
                         'input_ids': inputs,
                         'attention_mask': attention_mask,
                     }
-                    print('streamer inputs', streamer_inputs)
+                    # print('streamer inputs', streamer_inputs)
                     keywords = dict(streamer_inputs, **default_settings)
                     keywords['streamer'] = streamer
                     # create a thread to pull results from the model
