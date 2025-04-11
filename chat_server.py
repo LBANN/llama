@@ -67,6 +67,23 @@ TEMPERATURE_DEFAULT = 1.0
 TOP_P_DEFAULT = 1.0
 
 
+def clamp_0_to_1_value(value: float) -> float:
+    """
+    Clamps a floating-point value to the range [1e-5, 1.0].
+
+    This function ensures that input values are bounded between a small positive
+    number (1e-5) and 1.0, which is useful for parameters like temperature and
+    top_p in language model inference that must be positive and not exceed 1.
+
+    Args:
+        value (float): The input value to be clamped.
+
+    Returns:
+        float: The clamped value, guaranteed to be between 1e-5 and 1.0 inclusive.
+    """
+    return min(1.0, max(1e-5, value))
+
+
 @dataclass
 class ChatRequest:
     """
@@ -193,9 +210,15 @@ async def completions(request: Request):
         settings["temperature"] = request_body.get(
             "temperature", TEMPERATURE_DEFAULT,
         )
+        settings["temperature"] = clamp_0_to_1_value(
+            settings["temperature"]
+        )
     if "top_p" in request_body:
         settings["top_p"] = request_body.get(
             "top_p", TOP_P_DEFAULT,
+        )
+        settings["top_p"] = clamp_0_to_1_value(
+            settings["top_p"]
         )
 
     if tokenizer is not None:
